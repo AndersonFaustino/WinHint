@@ -1,0 +1,3 @@
+{"name": "prefetch_obj", "cpu": {"clock": "fast"},
+ "cache": {"l1d_size": 32768, "prefetcher": {"type": "stride", "degree": 2}},
+ "memory": {"latency_cycles": 120}}

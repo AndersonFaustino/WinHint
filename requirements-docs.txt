@@ -1,0 +1,19 @@
+# WinHint documentation dependencies.
+#
+#   pip install -r requirements-docs.txt
+#
+# The MkDocs site (mkdocs.yml): Markdown guides, the Python API reference
+# (mkdocstrings, static analysis via griffe) and the C/C++ API reference
+# (Doxygen through mkdoxy; doxygen itself comes from conda). Build it with
+# `make docs` (strict: warnings are errors). The pins must match the DOCS_* keys
+# of tooling/versions.lock, which create_conda_env.sh checks.
+
+-r requirements.txt
+
+mkdocs==1.6.1
+mkdocs-material==9.7.7
+mkdocstrings-python==2.0.8
+mkdocs-gen-files==0.6.1
+mkdocs-literate-nav==0.6.3
+mkdocs-section-index==0.3.12
+mkdoxy==1.2.8

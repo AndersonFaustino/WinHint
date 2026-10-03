@@ -1,0 +1,234 @@
+diff --git a/ggml/CMakeLists.txt b/ggml/CMakeLists.txt
+index 752dabb..e69272d 100644
+--- a/ggml/CMakeLists.txt
++++ b/ggml/CMakeLists.txt
+@@ -150,6 +150,9 @@ message(DEBUG "INS_ENB             : ${INS_ENB}")
+ 
+ option(GGML_CPU_HBM          "ggml: use memkind for CPU HBM" OFF)
+ option(GGML_CPU_REPACK       "ggml: use runtime weight conversion of Q4_0 to Q4_X_X" ON)
++option(GGML_WINHINT          "ggml: WinHint operator/layer hooks via libwinhint" OFF)
++set(GGML_WINHINT_INCLUDE "" CACHE PATH "ggml: directory containing winhint.h")
++set(GGML_WINHINT_LIB "" CACHE FILEPATH "ggml: libwinhint library")
+ option(GGML_CPU_KLEIDIAI     "ggml: use KleidiAI optimized kernels if applicable" OFF)
+ option(GGML_SSE42            "ggml: enable SSE 4.2"          ${INS_ENB})
+ option(GGML_AVX              "ggml: enable AVX"              ${INS_ENB})
+diff --git a/ggml/src/ggml-cpu/CMakeLists.txt b/ggml/src/ggml-cpu/CMakeLists.txt
+index 71f55b4..169838f 100644
+--- a/ggml/src/ggml-cpu/CMakeLists.txt
++++ b/ggml/src/ggml-cpu/CMakeLists.txt
+@@ -76,6 +76,16 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
+         endif()
+     endif()
+ 
++    if (GGML_WINHINT)
++        # WinHint operator/layer hooks (WinHint hw/integrations/llamacpp)
++        if (NOT GGML_WINHINT_INCLUDE OR NOT GGML_WINHINT_LIB)
++            message(FATAL_ERROR "GGML_WINHINT=ON needs GGML_WINHINT_INCLUDE (dir of winhint.h) and GGML_WINHINT_LIB (libwinhint.a/.so)")
++        endif()
++        target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_WINHINT)
++        target_include_directories(${GGML_CPU_NAME} PRIVATE ${GGML_WINHINT_INCLUDE})
++        target_link_libraries(${GGML_CPU_NAME} PRIVATE ${GGML_WINHINT_LIB})
++    endif()
++
+     if (GGML_OPENMP_ENABLED)
+         target_compile_definitions(${GGML_CPU_NAME} PRIVATE GGML_USE_OPENMP)
+         target_link_libraries(${GGML_CPU_NAME} PRIVATE ${GGML_OPENMP_TARGET_C} ${GGML_OPENMP_TARGET_CXX})
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index 8620c6c..4a8bfbe 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -15,6 +15,9 @@
+ #include "ggml.h"
+ #include "common.h"
+ #include "tiled/tiled.h"
++#ifdef GGML_WINHINT
++#include "winhint-hooks.h"
++#endif
+ 
+ #if defined(_MSC_VER) || defined(__MINGW32__)
+ #include <malloc.h> // using malloc.h with MSC/MINGW
+@@ -3138,6 +3141,12 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
+             continue;
+         }
+ 
++#ifdef GGML_WINHINT
++        if (state->ith == 0) {
++            ggml_winhint_node(node);
++        }
++#endif
++
+         // TODO: move fused-op detection into ggml_graph_plan so fusion decisions are made once at planning time
+         // Try fused ops, fall back to normal compute
+         const int n_fused = ggml_cpu_try_fuse_ops(cgraph, node_n, &params, cplan);
+@@ -3158,6 +3167,12 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
+         }
+     }
+ 
++#ifdef GGML_WINHINT
++    if (state->ith == 0) {
++        ggml_winhint_graph_end();
++    }
++#endif
++
+ #ifdef GGML_USE_OPENMP
+     GGML_PRINT_DEBUG("thread #%d compute-done cplan %p\n", state->ith, (const void *)cplan);
+ #else
+diff --git a/ggml/src/ggml-cpu/winhint-hooks.h b/ggml/src/ggml-cpu/winhint-hooks.h
+new file mode 100644
+index 0000000..2d0680c
+--- /dev/null
++++ b/ggml/src/ggml-cpu/winhint-hooks.h
+@@ -0,0 +1,153 @@
++// winhint-hooks.h -- WinHint operator/layer-level hooks for the ggml CPU backend
++// (WinHint PROPOSAL Phase E2, optional; maintained as a patch in
++// WinHint/hw/integrations/llamacpp/). Compiled only with -DGGML_WINHINT=ON.
++//
++// Before each graph node computed by thread 0, the hook marks a region and,
++// if the advisory window changes, issues setwin through libwinhint's
++// runtime-call API (WinHint docs/interfaces.md §2, hw/libwinhint/winhint.h).
++// Only thread 0 (the caller / OpenMP master) calls libwinhint: libwinhint
++// migrates the calling thread only. Run with -t 1 for a single-threaded
++// placement experiment.
++//
++// Environment (read once, on the first hooked node):
++//   GGML_WINHINT_REGIONS = op (default) | layer | off
++//       op:    region id = operator class (table below, ids 0..9)
++//       layer: region id = 16 + (transformer layer % 48), parsed from the
++//              node name suffix "-<il>" (llama.cpp's cb(cur, "name", il));
++//              nodes without a layer suffix use their operator class id
++//       off:   no hook calls at all
++//   GGML_WINHINT_SETWIN  = "c:W,c:W,..." overrides the per-class window (entries;
++//              0 = release). GGML_WINHINT_SETWIN=none emits region markers only
++//              (oracle-style accounting, no window hints).
++#pragma once
++
++#include "winhint.h"   // hw/libwinhint/winhint.h
++
++#include <stdlib.h>
++#include <string.h>
++
++enum {
++    WH_CLS_OTHER = 0,  // anything not listed below
++    WH_CLS_MATMUL,     // MUL_MAT, MUL_MAT_ID, OUT_PROD (weight GEMV/GEMM)
++    WH_CLS_NORM,       // NORM, RMS_NORM, GROUP_NORM, L2_NORM
++    WH_CLS_SOFTMAX,    // SOFT_MAX
++    WH_CLS_ROPE,       // ROPE
++    WH_CLS_ATTN,       // FLASH_ATTN_EXT
++    WH_CLS_BINARY,     // ADD, ADD1, ADD_ID, SUB, MUL, DIV, SCALE, ACC
++    WH_CLS_UNARY,      // UNARY, GLU, CLAMP, LEAKY_RELU, SQR, SQRT
++    WH_CLS_MOVE,       // CPY, CONT, DUP, GET_ROWS, SET_ROWS, CONCAT, REPEAT, SET
++    WH_CLS_REDUCE,     // SUM, SUM_ROWS, MEAN, ARGMAX, ARGSORT, TOP_K
++    WH_CLS_N
++};
++
++// Default advisory windows (ROB entries), a static per-class model in the spirit of
++// the WinHint pass: weight GEMV/GEMM is streaming and MLP-rich -> full window;
++// short reductions / elementwise ops gain little from a deep window -> small one.
++// These are placeholders until the compiler's cost model is run over ggml's kernels.
++static unsigned wh_cls_win[WH_CLS_N] = {
++    /* OTHER   */ 0,   /* MATMUL */ 256, /* NORM  */ 64,  /* SOFTMAX */ 64,
++    /* ROPE    */ 64,  /* ATTN   */ 256, /* BINARY*/ 128, /* UNARY   */ 64,
++    /* MOVE    */ 128, /* REDUCE */ 64,
++};
++
++static int      wh_mode    = -1;   // -1 = not initialised, 0 = off, 1 = op, 2 = layer
++static int      wh_setwin  = 1;
++static unsigned wh_cur_reg = ~0u;
++static unsigned wh_cur_win = ~0u;
++
++static int wh_op_class(enum ggml_op op) {
++    switch (op) {
++        case GGML_OP_MUL_MAT: case GGML_OP_MUL_MAT_ID: case GGML_OP_OUT_PROD:
++            return WH_CLS_MATMUL;
++        case GGML_OP_NORM: case GGML_OP_RMS_NORM: case GGML_OP_GROUP_NORM: case GGML_OP_L2_NORM:
++            return WH_CLS_NORM;
++        case GGML_OP_SOFT_MAX:
++            return WH_CLS_SOFTMAX;
++        case GGML_OP_ROPE:
++            return WH_CLS_ROPE;
++        case GGML_OP_FLASH_ATTN_EXT:
++            return WH_CLS_ATTN;
++        case GGML_OP_ADD: case GGML_OP_ADD1: case GGML_OP_ADD_ID: case GGML_OP_SUB:
++        case GGML_OP_MUL: case GGML_OP_DIV: case GGML_OP_SCALE: case GGML_OP_ACC:
++            return WH_CLS_BINARY;
++        case GGML_OP_UNARY: case GGML_OP_GLU: case GGML_OP_CLAMP: case GGML_OP_LEAKY_RELU:
++        case GGML_OP_SQR: case GGML_OP_SQRT:
++            return WH_CLS_UNARY;
++        case GGML_OP_CPY: case GGML_OP_CONT: case GGML_OP_DUP: case GGML_OP_GET_ROWS:
++        case GGML_OP_SET_ROWS: case GGML_OP_CONCAT: case GGML_OP_REPEAT: case GGML_OP_SET:
++            return WH_CLS_MOVE;
++        case GGML_OP_SUM: case GGML_OP_SUM_ROWS: case GGML_OP_MEAN: case GGML_OP_ARGMAX:
++        case GGML_OP_ARGSORT: case GGML_OP_TOP_K:
++            return WH_CLS_REDUCE;
++        default:
++            return WH_CLS_OTHER;
++    }
++}
++
++static void wh_init(void) {
++    const char * m = getenv("GGML_WINHINT_REGIONS");
++    wh_mode = 1;
++    if (m && *m) {
++        if      (!strcmp(m, "off") || !strcmp(m, "0")) wh_mode = 0;
++        else if (!strcmp(m, "layer"))                    wh_mode = 2;
++    }
++    const char * s = getenv("GGML_WINHINT_SETWIN");
++    if (s && *s) {
++        if (!strcmp(s, "none")) {
++            wh_setwin = 0;
++        } else {
++            // "c:W,c:W,..."
++            const char * p = s;
++            while (*p) {
++                char * e;
++                long c = strtol(p, &e, 10);
++                if (e == p || *e != ':') break;
++                long w = strtol(e + 1, &e, 10);
++                if (c >= 0 && c < WH_CLS_N && w >= 0) wh_cls_win[c] = (unsigned) w;
++                p = (*e == ',') ? e + 1 : e;
++                if (*e != ',') break;
++            }
++        }
++    }
++}
++
++// Layer index from a llama.cpp node name "<name>-<il>"; -1 if none.
++static int wh_layer_of(const char * name) {
++    const char * d = strrchr(name, '-');
++    if (!d || !d[1]) return -1;
++    int v = 0;
++    for (const char * q = d + 1; *q; q++) {
++        if (*q < '0' || *q > '9') return -1;
++        v = v * 10 + (*q - '0');
++    }
++    return v;
++}
++
++static inline void ggml_winhint_node(const struct ggml_tensor * node) {
++    if (__builtin_expect(wh_mode < 0, 0)) wh_init();
++    if (wh_mode == 0) return;
++    const int cls = wh_op_class(node->op);
++    unsigned reg = (unsigned) cls;
++    if (wh_mode == 2) {
++        const int il = wh_layer_of(node->name);
++        if (il >= 0) reg = 16u + (unsigned) (il % 48);
++    }
++    if (reg != wh_cur_reg) {
++        __winhint_region(reg);
++        wh_cur_reg = reg;
++    }
++    if (wh_setwin && wh_cls_win[cls] != wh_cur_win) {
++        __winhint_setwin(wh_cls_win[cls]);
++        wh_cur_win = wh_cls_win[cls];
++    }
++}
++
++// End of a graph: release the window (W = 0) so code between graphs
++// (sampling, tokenisation) runs with the default placement.
++static inline void ggml_winhint_graph_end(void) {
++    if (wh_mode <= 0) return;
++    if (wh_setwin && wh_cur_win != 0) {
++        __winhint_setwin(0);
++        wh_cur_win = 0;
++    }
++}

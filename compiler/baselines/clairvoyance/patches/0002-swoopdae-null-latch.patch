@@ -1,0 +1,58 @@
+SwoopDAE null-latch crash (WinHint). CreatePhaseWithCFGLoads assumes that when the
+loop latch ends in an unconditional branch, its single predecessor holds the exit
+branch. After -single-loop-unroll of a body that ends in a guarded block (e.g. the
+padding checks of contrast_mobilenet_infer's conv3x3_stem), the latch is the join
+block of that guard: getSinglePredecessor() is null and Latch->getTerminator()
+segfaults. Fall back to the loop's unique exiting block (the block with the exit
+branch). BranchMerge's minimizeFunctionFromBranchPred makes the same choice so the
+exit branch is never "reduced". PhaseStitching's getExitingBlock (placement of the
+execute-phase end marker) has the same assumption; it falls back to the latch.
+Applied by build.sh after 0001.
+
+diff -ru a/projects/src/SWOOP/Transform/PhaseStitching.cpp b/projects/src/SWOOP/Transform/PhaseStitching.cpp
+--- a/projects/src/SWOOP/Transform/PhaseStitching.cpp	2026-10-01 19:38:35.631817815 -0300
++++ b/projects/src/SWOOP/Transform/PhaseStitching.cpp	2026-10-01 19:38:35.682881958 -0300
+@@ -151,6 +151,10 @@
+ 
+   if (TI->getNumSuccessors() == 1) {
+     executeBodyEnd = latch->getSinglePredecessor();
++    // WinHint: a latch that joins several paths has no single predecessor;
++    // place the phase-end marker in the latch itself instead of crashing.
++    if (!executeBodyEnd)
++      executeBodyEnd = latch;
+   } else {
+     executeBodyEnd = latch;
+   }
+diff -ru a/projects/src/SWOOP/Transform/SwoopDAE/SwoopDAE.cpp b/projects/src/SWOOP/Transform/SwoopDAE/SwoopDAE.cpp
+--- a/projects/src/SWOOP/Transform/SwoopDAE/SwoopDAE.cpp	2026-10-01 19:36:16.154080262 -0300
++++ b/projects/src/SWOOP/Transform/SwoopDAE/SwoopDAE.cpp	2026-10-01 19:36:25.038886032 -0300
+@@ -210,7 +210,14 @@
+   set<Instruction*> LoopCFGTerminators;
+   BasicBlock *Latch = SwoopLoop->getLoopLatch();
+   if (Latch->getTerminator()->getNumSuccessors() == 1) {
+-    Latch = Latch->getSinglePredecessor();
++    // WinHint: the latch's single predecessor is null when the latch joins
++    // several paths (a guarded block at the end of the body, e.g. after -single-loop-unroll):
++    // fall back to the loop's unique exiting block, which holds the exit branch.
++    BasicBlock *Pred = Latch->getSinglePredecessor();
++    if (!Pred)
++      Pred = SwoopLoop->getExitingBlock();
++    if (Pred)
++      Latch = Pred;
+   };
+ 
+   set<Instruction *> toKeep;
+diff -ru a/projects/src/Util/Transform/BranchMerge/BranchMerge.cpp b/projects/src/Util/Transform/BranchMerge/BranchMerge.cpp
+--- a/projects/src/Util/Transform/BranchMerge/BranchMerge.cpp	2026-10-01 19:36:16.171192485 -0300
++++ b/projects/src/Util/Transform/BranchMerge/BranchMerge.cpp	2026-10-01 19:36:25.038960700 -0300
+@@ -100,6 +100,10 @@
+   Loop *L = *(Loops.begin());
+   BasicBlock *Latch = L->getLoopLatch();
+   BasicBlock *CondBranchBB = (Latch->getUniquePredecessor()) ? Latch->getUniquePredecessor() : Latch;
++  // WinHint: same block as SwoopDAE::CreatePhaseWithCFGLoads picks (the exit
++  // branch must never be reduced), also when the latch joins several paths.
++  if (CondBranchBB == Latch && Latch->getTerminator()->getNumSuccessors() == 1 && L->getExitingBlock())
++    CondBranchBB = L->getExitingBlock();
+ 
+   for (Function::iterator block = cF->begin(), blockEnd = cF->end(); block != blockEnd; ++block) {
+     BasicBlock *BB = &*block;

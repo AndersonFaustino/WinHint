@@ -1,0 +1,34 @@
+; B6 (JonesIQ.so): DAG-based IQ demand, hint encodings, redundancy removal
+; across calls (inputs/jones_calls.c: loop B follows a call that changes the
+; setting -> kept; loop C repeats B's setting -> removed).
+;
+; RUN: rm -rf %t && mkdir -p %t
+; IQ only, contract encoding (setwin of the smallest config whose IQ covers the demand).
+; RUN: %rvcc -O2 -gline-tables-only %jqflags -mllvm -jones-mode=iq -mllvm -jones-out-dir=%t/iq -mllvm -jones-verbose -c %inputs/jones_calls.c -o %t/iq.o 2> %t/iq.err
+; RUN: FileCheck %s --check-prefix=IQ < %t/iq.err
+; RUN: %python %S/Inputs/check_jones.py %t/iq/jones_calls.jones.json iq setwin
+; RUN: llvm-objdump -d %t/iq.o | FileCheck %s --check-prefix=RVW
+; Proposed IQ-only tag (25).
+; RUN: %rvcc -O2 -gline-tables-only %jqflags -mllvm -jones-mode=iq -mllvm -jones-iq-encoding=setiq -mllvm -jones-out-dir=%t/sq -c %inputs/jones_calls.c -o %t/sq.o
+; RUN: %python %S/Inputs/check_jones.py %t/sq/jones_calls.jones.json iq setiq
+; RUN: llvm-objdump -d %t/sq.o | FileCheck %s --check-prefix=RVQ
+; Extension to ROB/LSQ.
+; RUN: %rvcc -O2 -gline-tables-only %jqflags -mllvm -jones-mode=full -mllvm -jones-out-dir=%t/full -c %inputs/jones_calls.c -o %t/full.o
+; RUN: %python %S/Inputs/check_jones.py %t/full/jones_calls.jones_full.json full setwin
+; RUN: llvm-objdump -d %t/full.o | FileCheck %s --check-prefix=RVW
+; x86 and call mode.
+; RUN: %x86cc -O2 %jqflags -mllvm -jones-mode=iq -c %inputs/jones_calls.c -o %t/x86.o
+; RUN: llvm-objdump -d %t/x86.o | FileCheck %s --check-prefix=X86
+; RUN: %x86cc -O2 %jqflags -mllvm -jones-emit=call -S -emit-llvm %inputs/jones_calls.c -o - | FileCheck %s --check-prefix=CALL
+; RUN: %x86cc -O2 %jqflags -mllvm -jones-emit=call -mllvm -jones-iq-encoding=setiq -S -emit-llvm %inputs/jones_calls.c -o - | FileCheck %s --check-prefix=CALLQ
+
+; IQ: jones-iq: g line {{[0-9]+}} loop insts={{[0-9]+}} IQ={{[0-9]+}} config={{[0-9]}} -> setwin({{64|128|192|256}}) ori x0,x0,{{[0-9]+}} [0x{{[0-9a-f]+}}506013]
+; IQ: jones-iq: f line
+
+; Only setwin words (tag 21: low 5 bits of the imm = 0x15) appear.
+; RVW-NOT: ori zero, zero, {{0x[0-9a-f]*(17|19|37|39|57|59|77|79|97|99|b7|b9|d7|d9|f7|f9)$}}
+; RVW:     {{[0-9a-f]+}}506013 {{.*}}ori zero, zero, 0x{{[0-9a-f]*}}5
+; RVQ:     {{[0-9a-f]+}}906013 {{.*}}ori zero, zero, 0x{{[0-9a-f]*}}9
+; X86:     0f 1f 80 {{[0-9a-f][0-9a-f]}} 10 48 57 {{.*}}nopl 0x574810{{[0-9a-f][0-9a-f]}}(%rax)
+; CALL:    call void @__winhint_setwin(i32 {{64|128|192|256}})
+; CALLQ-NOT: call void @__winhint_

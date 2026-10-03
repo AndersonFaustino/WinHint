@@ -1,0 +1,233 @@
+# WinHint documentation site.
+#   tooling/winhint.sh docs:build   → build/site (strict)
+#   tooling/winhint.sh docs:serve   → http://127.0.0.1:8000
+# Runs in the conda env `winhint` (requirements-docs.txt).
+site_name: WinHint
+site_description: >-
+  Static analysis of memory-level parallelism to drive microarchitectural reconfiguration.
+site_author: Anderson Faustino da Silva
+copyright: Copyright &copy; Anderson Faustino da Silva — Apache License 2.0
+repo_url: https://github.com/AndersonFaustino/WinHint
+repo_name: AndersonFaustino/WinHint
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: build/site
+strict: true
+
+exclude_docs: |
+  _tools/
+  _snippets/
+
+# mkdoxy generates one page per C/C++ file, class and member; they are reached from each
+# project's index pages (linked in the nav), not listed in the nav themselves.
+not_in_nav: |
+  /api/cpp/*/
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+theme:
+  name: material
+  language: en
+  icon:
+    logo: material/window-restore
+    repo: fontawesome/brands/github
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      base_path: [.]
+      check_paths: true
+      auto_append:
+        - docs/_snippets/abbreviations.md
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+hooks:
+  - docs/_tools/hooks.py
+
+plugins:
+  - search
+  - gen-files:
+      scripts:
+        - docs/_tools/gen_pages.py
+  - literate-nav:
+      nav_file: SUMMARY.md
+  - section-index
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: google
+            docstring_section_style: table
+            show_source: true
+            show_root_heading: false
+            show_root_toc_entry: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            show_signature_annotations: true
+            separate_signature: true
+            signature_crossrefs: true
+            members_order: source
+            merge_init_into_class: true
+            filters: ["!^__", "!^_[^_]"]
+            heading_level: 2
+  - mkdoxy:
+      save-api: build/doxygen
+      projects:
+        compiler:
+          src-dirs: compiler/winhint compiler/common compiler/baselines
+          api-path: api/cpp/compiler
+          full-doc: true
+          doxy-cfg:
+            PROJECT_NAME: "WinHint compiler"
+            FILE_PATTERNS: "*.cpp *.h *.hh *.cc"
+            EXTRACT_ALL: YES
+            EXTRACT_STATIC: YES
+            EXTRACT_PRIVATE: YES
+            JAVADOC_AUTOBRIEF: YES
+            WARN_IF_UNDOCUMENTED: NO
+        gem5:
+          src-dirs: sim/gem5/src/cpu/o3/window
+          api-path: api/cpp/gem5
+          full-doc: true
+          doxy-cfg:
+            PROJECT_NAME: "WinHint gem5 window controller"
+            FILE_PATTERNS: "*.cc *.hh"
+            EXCLUDE_PATTERNS: "*/tests/*"
+            EXTRACT_ALL: YES
+            EXTRACT_STATIC: YES
+            EXTRACT_PRIVATE: YES
+            JAVADOC_AUTOBRIEF: YES
+            WARN_IF_UNDOCUMENTED: NO
+        hw:
+          src-dirs: hw
+          api-path: api/cpp/hw
+          full-doc: true
+          doxy-cfg:
+            PROJECT_NAME: "WinHint real-hardware runtime"
+            FILE_PATTERNS: "*.c *.h *.cc *.hh"
+            EXCLUDE_PATTERNS: "*/tests/*"
+            EXTRACT_ALL: YES
+            EXTRACT_STATIC: YES
+            JAVADOC_AUTOBRIEF: YES
+            OPTIMIZE_OUTPUT_FOR_C: YES
+            WARN_IF_UNDOCUMENTED: NO
+        benchmarks:
+          src-dirs: benchmarks
+          api-path: api/cpp/benchmarks
+          full-doc: true
+          doxy-cfg:
+            PROJECT_NAME: "WinHint workloads"
+            FILE_PATTERNS: "*.c *.h"
+            EXTRACT_ALL: YES
+            EXTRACT_STATIC: YES
+            JAVADOC_AUTOBRIEF: YES
+            OPTIMIZE_OUTPUT_FOR_C: YES
+            WARN_IF_UNDOCUMENTED: NO
+
+nav:
+  - Home: index.md
+  - Concepts:
+      - Background: concepts/background.md
+      - How WinHint works: guide/architecture.md
+      - Evaluation methodology: concepts/methodology.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Repository layout: estrutura.md
+  - User guide:
+      - Running experiments: guide/usage.md
+      - Workloads:
+          - guide/workloads.md
+          - Generated kernels (TVM/IREE): guide/workloads-generated.md
+      - Compiler: guide/compiler.md
+      - gem5 model:
+          - guide/gem5/index.md
+          - Window policies: guide/gem5/policies.md
+          - gem5 patches: guide/gem5/patches.md
+      - Baselines:
+          - guide/baselines/index.md
+          - B6 Jones IQ: guide/baselines/jones-iq.md
+          - B8 Clairvoyance: guide/baselines/clairvoyance.md
+          - B9 Long-Term Parking: guide/baselines/ltp.md
+      - Simulator fidelity: guide/fidelity.md
+      - Real hardware:
+          - guide/hardware/index.md
+          - Microarchitecture parameters: guide/hardware/uarch-params.md
+          - llama.cpp integration: guide/hardware/llamacpp.md
+      - Testing and verification: guide/testing.md
+  - Reference:
+      - Interfaces (contract): interfaces.md
+      - Compiler statistics: reference/stats-schema.md
+      - Toolchain and versions: reference/toolchain.md
+      - Deviations: deviations.md
+      - Glossary: reference/glossary.md
+      - Design proposal: reference/proposal.md
+  - API:
+      - api/index.md
+      - Python: api/python/
+      - C/C++:
+          - api/cpp/index.md
+          - Compiler (LLVM plugins): api/cpp/compiler/files.md
+          - gem5 window controller: api/cpp/gem5/annotated.md
+          - Real-hardware runtime: api/cpp/hw/files.md
+          - Workloads: api/cpp/benchmarks/files.md
+  - Contributing:
+      - Commit gate and coverage: contributing/quality.md
+      - Writing documentation: contributing/documentation.md
+      - Project status: checklist.md

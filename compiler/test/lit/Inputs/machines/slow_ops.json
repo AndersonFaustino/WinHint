@@ -1,0 +1,1 @@
+{"name": "slow_ops", "latency": {"int_mul": 40, "fp_mul": 40, "fp_sqrt": 40, "call": 40}}

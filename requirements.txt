@@ -1,0 +1,20 @@
+# WinHint runtime dependencies.
+#
+#   pip install -r requirements.txt
+#
+# The analysis stack of the cost model, the simulators' post-processing and the
+# ML inference workloads. PyTorch is built for this machine's accelerator:
+# tooling/create_conda_env.sh detects an NVIDIA/AMD GPU and installs it first from
+# the matching PyTorch index (CUDA/ROCm, or CPU without a GPU). The toolchain (clang/LLVM, GCC, the
+# RISC-V cross GCC, QEMU, scons, Rust, perf, ...) is not a Python dependency:
+# it comes from conda, see environment.yml.
+
+numpy
+pandas
+scipy
+matplotlib
+seaborn
+scikit-learn
+torch
+pyyaml
+tqdm

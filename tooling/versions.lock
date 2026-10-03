@@ -1,0 +1,79 @@
+# WinHint pinned versions. Read by tooling/create_conda_env.sh (checks the installed
+# env against these) and tooling/winhint.sh (gem5/McPAT tags).
+# Format: KEY=VALUE, '#' starts a comment.
+
+# --- Research artifacts built from source ----------------------------------
+GEM5=v25.1.0.0
+GEM5_REPO=https://github.com/gem5/gem5.git
+MCPAT=v1.3.0
+MCPAT_REPO=https://github.com/HewlettPackard/mcpat.git
+# llama.cpp operator hooks (optional, Phase E2; hw/integrations/llamacpp/)
+LLAMACPP=b11327
+LLAMACPP_COMMIT=552f18f912a32ea86edf82e2b76431cb7131538d
+LLAMACPP_MODEL=stories15M-q4_0.gguf
+LLAMACPP_MODEL_SHA256=66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739
+
+# --- micromamba env `winhint` (environment.yml) --------------------
+PYTHON=3.14
+LLVM=23.1.2
+HOST_GCC=13
+RISCV_GCC=15.3
+RISCV_SYSROOT=2.39
+QEMU=11.0.3
+# glib (libglib + glib + glib-tools, same version): intel-lpmd (R3) build deps
+GLIB=2.90.0
+
+# --- micromamba env `winhint-llvm38` (Clairvoyance, B8) --------------------
+LLVM38=3.8.1
+
+# --- micromamba env `winhint-kmod` (PMCTrack kernel module, R4) -----------
+# Kernel modules must be built with the host kernel's compiler (GCC 15.2;
+# its flags include -fmin-function-alignment=16, which GCC 13 rejects).
+KMOD_GCC=15.2
+
+# --- micromamba env `winhint-tex` (paper in ../WinHint-paper, Phase F) -----
+# conda-forge tectonic; acmart comes from tectonic's bundle (downloaded on first use)
+TECTONIC=0.17.0
+
+# --- documentation site (requirements-docs.txt, pip into env `winhint`; doxygen from environment.yml)
+# MkDocs + Material, mkdocstrings (Python API), mkdoxy + Doxygen (C/C++ API).
+DOCS_MKDOCS=1.6.1
+DOCS_MATERIAL=9.7.7
+DOCS_MKDOCSTRINGS_PYTHON=2.0.8
+DOCS_MKDOXY=1.2.8
+DOCS_DOXYGEN=1.18.0
+
+# --- Substitutions (PROPOSAL §8) -------------------------------------------
+# RISCV_GCC: conda-forge has no RISC-V cross GCC 13 (only 15.2+), and the
+#   gcc_linux-riscv64 wrapper pins gcc_impl_linux-64 to its own version,
+#   which conflicts with host GCC 13. We install gcc_impl_linux-riscv64 /
+#   gxx_impl_linux-riscv64 15.3 directly (binaries
+#   riscv64-conda-linux-gnu-gcc / -g++). Clang 23 with
+#   --target=riscv64-conda-linux-gnu, the same sysroot and -fuse-ld=lld also
+#   works ($WINHINT_RISCV_CLANG_FLAGS). riscv64-unknown-linux-gnu does NOT
+#   (clang cannot find crt*/libgcc under the conda triple).
+# QEMU: there is no `qemu` package on conda-forge; the user-mode emulator
+#   comes from `qemu-execve-riscv64` (QEMU 11.0.3), exposed as qemu-riscv64.
+# LIBCXX: libcxx-devel 23.1.2 requires gxx_linux-64>=14 (conflicts with GCC
+#   13); not installed, the plugin uses libstdc++ (as conda llvmdev does).
+# LIBBPF/BPFTOOL: no conda package on any public channel checked
+#   (conda-forge). The sched_ext schedulers (R2) still build: the Rust crate
+#   libbpf-sys vendors libbpf, and the BPF objects are compiled with the env's
+#   clang 23 (hw/baselines/r2_sched_ext/install_scx.sh). bpftool is not
+#   needed for the build; `winhint.sh status` reports a host bpftool if one
+#   exists (not from conda, not required).
+# UPOWER-GLIB: no conda package (conda-forge, anaconda, bioconda checked).
+#   intel-lpmd (R3) needs it only to detect battery/AC mode; it builds against
+#   hw/baselines/r3_lpmd/upower_stub/ (reports "upowerd unreachable, AC power";
+#   run the campaign on AC power), recorded in WINHINT_LPMD_DEVIATIONS.
+#   libnl, libsystemd, libxml2-devel and glib (GLIB above: libglib, glib with
+#   glib-compile-resources + glibconfig.h, glib-tools) are in the `winhint` env.
+# LLVM38: conda-forge ships llvmdev/clangdev 3.8.1 (old builds that depend on
+#   the legacy `system` package, taken from the `numba` channel). No `clang`
+#   3.8 package exists; clangdev provides the clang 3.8 binaries.
+# TVM/IREE (optional generated-C kernels, Phase B): conda-forge has no TVM
+#   compiler (only apache-tvm-ffi) and no IREE; not done (docs/guide/workloads-generated.md).
+# PMCTRACK: the v4.0 kernel module does not build on kernel 7.0 (removed APIs);
+#   R4 uses its perf_event_open backend (docs/guide/hardware/index.md).
+# PERF: provided by conda-forge `linux-perf`; libwinhint uses
+#   perf_event_open directly and does not depend on it.

@@ -1,0 +1,2 @@
+{"name": "no_prefetch", "cpu": {"clock": "ghz"},
+ "cache": {"l1d_prefetcher": "Stride", "prefetcher": "null"}}

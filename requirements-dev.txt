@@ -1,0 +1,18 @@
+# WinHint development dependencies: tests, coverage and the commit gate.
+#
+#   pip install -r requirements-dev.txt
+#
+# pytest and the Python coverage gate (.coveragerc, tooling/coverage_gate.py) and
+# pre-commit. The C/C++ coverage gate needs gcovr, which comes from conda
+# (environment.yml). `make validate` also builds the documentation site, so
+# install requirements-docs.txt as well.
+
+-r requirements.txt
+
+# Tests
+pytest
+pytest-cov
+coverage
+
+# The commit gate (make install-hooks)
+pre-commit

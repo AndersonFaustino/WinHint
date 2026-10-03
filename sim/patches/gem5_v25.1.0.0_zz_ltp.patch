@@ -1,0 +1,239 @@
+diff --git a/src/cpu/o3/commit.cc b/src/cpu/o3/commit.cc
+index 405ea09..f0dd1d8 100644
+--- a/src/cpu/o3/commit.cc
++++ b/src/cpu/o3/commit.cc
+@@ -55,6 +55,7 @@
+ #include "cpu/o3/dyn_inst.hh"
+ #include "cpu/o3/limits.hh"
+ #include "cpu/o3/thread_state.hh"
++#include "cpu/o3/window/ltp/ltp_hooks.hh"
+ #include "cpu/timebuf.hh"
+ #include "debug/Activity.hh"
+ #include "debug/Commit.hh"
+@@ -289,6 +290,10 @@ Commit::startupStage()
+     rob->setActiveThreads(activeThreads);
+     rob->resetEntries();
+ 
++    // B9: the LTP stage reads the ROB head (wake-up of old instructions).
++    if (iewStage->ltp)
++        ltpSetROB(iewStage->ltp.get(), rob);
++
+     // Broadcast the number of free entries.
+     for (ThreadID tid = 0; tid < numThreads; tid++) {
+         toIEW->commitInfo[tid].usedROB = true;
+@@ -1249,6 +1254,10 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
+ 
+     updateComInstStats(head_inst);
+ 
++    // B9: train the LTP urgency table on committed instructions.
++    if (iewStage->ltp)
++        ltpCommit(iewStage->ltp.get(), head_inst);
++
+     DPRINTF(Commit,
+             "[tid:%i] [sn:%llu] Committing instruction with PC %s\n",
+             tid, head_inst->seqNum, head_inst->pcState());
+diff --git a/src/cpu/o3/iew.cc b/src/cpu/o3/iew.cc
+index d5be814..fff2d76 100644
+--- a/src/cpu/o3/iew.cc
++++ b/src/cpu/o3/iew.cc
+@@ -124,6 +124,8 @@ IEW::IEW(CPU *_cpu, const BaseO3CPUParams &params)
+     updateLSQNextCycle = false;
+ 
+     skidBufferMax = (renameToIEWDelay + 1) * params.renameWidth;
++
++    ltpInit(params);
+ }
+ 
+ std::string
+@@ -369,6 +371,10 @@ bool
+ IEW::isDrained() const
+ {
+     bool drained = ldstQueue.isDrained() && instQueue.isDrained();
++    if (ltp && !ltpEmpty()) {
++        DPRINTF(Drain, "LTP not empty.\n");
++        drained = false;
++    }
+ 
+     for (ThreadID tid = 0; tid < numThreads; tid++) {
+         if (!insts[tid].empty()) {
+@@ -446,6 +452,10 @@ IEW::squash(ThreadID tid)
+     ldstQueue.squash(fromCommit->commitInfo[tid].doneSeqNum, tid);
+     updatedQueues = true;
+ 
++    // B9: drop squashed instructions from the parking queue.
++    if (ltp)
++        ltpSquash(tid);
++
+     // Clear the skid buffer in case it has any data in it.
+     DPRINTF(IEW,
+             "Removing skidbuffer instructions until "
+@@ -849,6 +859,11 @@ IEW::dispatch(ThreadID tid)
+     //     check if stall conditions have passed
+     iewStats.dispatchStatus[dispatchStatus[tid]]++;
+ 
++    // B9: parked instructions are released every cycle, even when
++    // dispatch is blocked (the release is what unblocks it).
++    if (ltp)
++        ltpRelease(tid);
++
+     // Dispatch should try to dispatch as many instructions as its bandwidth
+     // will allow, as long as it is not currently blocked.
+     if (dispatchStatus[tid] == Running ||
+@@ -880,6 +895,11 @@ IEW::dispatch(ThreadID tid)
+ void
+ IEW::dispatchInsts(ThreadID tid)
+ {
++    if (ltp) {
++        ltpDispatchInsts(tid);
++        return;
++    }
++
+     // Obtain instructions from skid buffer if unblocking, or queue from rename
+     // otherwise.
+     std::queue<DynInstPtr> &insts_to_dispatch =
+diff --git a/src/cpu/o3/iew.hh b/src/cpu/o3/iew.hh
+index dfc12fa..fb89fc2 100644
+--- a/src/cpu/o3/iew.hh
++++ b/src/cpu/o3/iew.hh
+@@ -41,6 +41,7 @@
+ #ifndef __CPU_O3_IEW_HH__
+ #define __CPU_O3_IEW_HH__
+ 
++#include <memory>
+ #include <queue>
+ #include <set>
+ 
+@@ -64,6 +65,7 @@ namespace o3
+ {
+ 
+ class FUPool;
++class LongTermParking;
+ 
+ /**
+  * IEW handles both single threaded and SMT IEW
+@@ -480,6 +482,31 @@ class IEW
+         /** Average number of woken instructions per writeback. */
+         statistics::Formula wbFanout;
+     } iewStats;
++
++  public:
++    /** B9 Long-Term Parking stage (window_policy=ltp); null otherwise.
++     * See src/cpu/o3/window/ltp/. */
++    std::shared_ptr<LongTermParking> ltp;
++
++  private:
++    /** LTP: the member functions below are defined in
++     * window/ltp/ltp_iew.cc. */
++    void ltpInit(const BaseO3CPUParams &params);
++    /** Release parked instructions (every cycle, before dispatch). */
++    void ltpRelease(ThreadID tid);
++    /** dispatchInsts() with parking. */
++    void ltpDispatchInsts(ThreadID tid);
++    /** Remove squashed instructions from the parking queue. */
++    void ltpSquash(ThreadID tid);
++    /** Insert one instruction into the IQ/LSQ (released: from the LTP). */
++    void ltpToQueues(const DynInstPtr &inst, ThreadID tid, bool released);
++    /** No instruction is parked (drain check). */
++    bool ltpEmpty() const;
++    /** IQ has room for non-urgent instructions (LTP room rule). */
++    bool ltpRoom(ThreadID tid);
++    /** IQ insertion slots left this cycle (shared by releases and new
++     * dispatches). */
++    unsigned ltpIqSlots[MaxThreads] = {};
+ };
+ 
+ } // namespace o3
+diff --git a/src/cpu/o3/inst_queue.cc b/src/cpu/o3/inst_queue.cc
+index c8100ce..bfafffa 100644
+--- a/src/cpu/o3/inst_queue.cc
++++ b/src/cpu/o3/inst_queue.cc
+@@ -1742,5 +1742,66 @@ InstructionQueue::dumpInsts()
+     }
+ }
+ 
++void
++InstructionQueue::insertParked(const DynInstPtr &new_inst)
++{
++    assert(new_inst);
++    if (new_inst->isFloating()) {
++        iqIOStats.fpInstQueueWrites++;
++    } else if (new_inst->isVector()) {
++        iqIOStats.vecInstQueueWrites++;
++    } else {
++        iqIOStats.intInstQueueWrites++;
++    }
++
++    DPRINTF(IQ, "Adding parked instruction [sn:%llu] PC %s to the IQ.\n",
++            new_inst->seqNum, new_inst->pcState());
++
++    // Keep instList sorted by age: released instructions are older than
++    // the urgent ones that bypassed them.
++    auto &list = instList[new_inst->threadNumber];
++    auto pos = list.end();
++    while (pos != list.begin() &&
++           (*std::prev(pos))->seqNum > new_inst->seqNum) {
++        --pos;
++    }
++    list.insert(pos, new_inst);
++
++    auto iq = findIQ(new_inst);
++    assert(iq);
++    iq->insert(new_inst);
++
++    addToDependents(new_inst);
++    // No addToProducers(): done when the instruction was parked.
++
++    if (new_inst->isMemRef()) {
++        memDepUnit[new_inst->threadNumber].insert(new_inst);
++    } else {
++        addIfReady(new_inst);
++    }
++
++    ++iqStats.instsAdded;
++}
++
++void
++InstructionQueue::forgetParkedProducer(const DynInstPtr &inst)
++{
++    for (int i = 0; i < inst->numDestRegs(); i++) {
++        PhysRegIdPtr dest_reg = inst->renamedDestIdx(i);
++        if (dest_reg->isAlwaysReady())
++            continue;
++        // Only clear the head if this instruction still owns it.
++        if (dependGraph.empty(dest_reg->flatIndex())) {
++            dependGraph.clearInst(dest_reg->flatIndex());
++        } else {
++            // Younger consumers are squashed with it and were removed by
++            // doSquash(); anything left is stale -- drop it.
++            while (!dependGraph.empty(dest_reg->flatIndex()))
++                dependGraph.pop(dest_reg->flatIndex());
++            dependGraph.clearInst(dest_reg->flatIndex());
++        }
++    }
++}
++
+ } // namespace o3
+ } // namespace gem5
+diff --git a/src/cpu/o3/inst_queue.hh b/src/cpu/o3/inst_queue.hh
+index 5805fdb..1bad526 100644
+--- a/src/cpu/o3/inst_queue.hh
++++ b/src/cpu/o3/inst_queue.hh
+@@ -347,6 +347,18 @@ class InstructionQueue
+         addToProducers(inst);
+     }
+ 
++    /** B9 (LTP): insert an instruction released from the parking queue.
++     * It was registered as the producer of its destination registers when
++     * it was parked (recordProducer), so consumers dispatched before it are
++     * already linked in the dependency graph; it is placed in instList in
++     * sequence-number order (the list must stay sorted for squash/commit).
++     */
++    void insertParked(const DynInstPtr &inst);
++
++    /** B9 (LTP): a parked instruction was squashed before reaching the IQ:
++     * clear the dependency-graph heads it set at park time. */
++    void forgetParkedProducer(const DynInstPtr &inst);
++
+     /** Process FU completion event. */
+     void processFUCompletion(const DynInstPtr &inst, FUPool *fu_pool,
+                              int fu_idx);

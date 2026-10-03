@@ -1,0 +1,105 @@
+; HintPlacement options and error paths, and the call-graph summaries
+; (Inputs/placement_calls.c: regions a_driver 0, b_small_calls 1, c_rec 2,
+; ksmall 3, kstream 4).
+;
+; RUN: rm -rf %t && mkdir -p %t/cwd
+; RUN: %rvcc -O2 -gline-tables-only -S -emit-llvm %S/Inputs/placement_calls.c -o %t/pc.ll
+;
+; (1) Calls in loops: a_driver's compute loop is hinted before the call to
+;     the hinted kstream() (whose own hint restores W_max), b_small_calls
+;     and the self-recursive c_rec (no callee summary yet) get the smallest
+;     window; -pass-remarks reports every hint with its source location.
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-target=%machine -winhint-stats-file=%t/calls.json -pass-remarks=winhint -disable-output %t/pc.ll 2>&1 | FileCheck %s --check-prefix=REMARK
+; RUN: %python -c "import json; d=json.load(open('%t/calls.json')); h=[(x['function'], x['depth'], x['value']) for x in d['hints']]; assert h == [('a_driver', 2, 64), ('b_small_calls', 1, 64), ('c_rec', 1, 64), ('kstream', 1, 256)], h"
+; REMARK: remark: {{.*}}placement_calls.c:36:5: setwin(64) W*=44
+; REMARK: remark: {{.*}}placement_calls.c:44:3: setwin(64)
+; REMARK: remark: {{.*}}placement_calls.c:51:3: setwin(64)
+; REMARK: remark: {{.*}}placement_calls.c:20:3: setwin(256) W*=256
+;
+; (2) -winhint-mode=off: nothing is placed, inserted or written.
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-mode=off -winhint-target=%machine -winhint-out-dir=%t/off -S %t/pc.ll -o %t/off.ll
+; RUN: not grep -q winhint.hint %t/off.ll
+; RUN: not ls %t/off
+;
+; (3) Unknown option values are usage errors (exit 1, no crash report).
+; RUN: not opt -load-pass-plugin=%wh -passes=winhint -winhint-mode=bogus -disable-output %t/pc.ll 2>&1 | FileCheck %s --check-prefix=BADMODE
+; RUN: not opt -load-pass-plugin=%wh -passes=winhint -winhint-emit=bogus -disable-output %t/pc.ll 2>&1 | FileCheck %s --check-prefix=BADEMIT
+; RUN: not opt -load-pass-plugin=%wh -passes=winhint -winhint-cp-model=bogus -disable-output %t/pc.ll 2>&1 | FileCheck %s --check-prefix=BADCP
+; BADMODE: winhint: unknown -winhint-mode=bogus
+; BADMODE-NOT: PLEASE submit a bug report
+; BADEMIT: winhint: unknown -winhint-emit=bogus
+; BADEMIT-NOT: PLEASE submit a bug report
+; BADCP:   winhint: unknown -winhint-cp-model=bogus (expected ii or width)
+; BADCP-NOT: PLEASE submit a bug report
+;
+; (4) -winhint-mode=from-json: unreadable, malformed and non-map files.
+; RUN: echo '{' > %t/bad.json
+; RUN: echo '5' > %t/num.json
+; RUN: not opt -load-pass-plugin=%wh -passes=winhint -winhint-mode=from-json=%t/none.json -disable-output %t/pc.ll 2>&1 | FileCheck %s --check-prefix=FJMISSING
+; RUN: not opt -load-pass-plugin=%wh -passes=winhint -winhint-mode=from-json=%t/bad.json -disable-output %t/pc.ll 2>&1 | FileCheck %s --check-prefix=FJBAD
+; RUN: not opt -load-pass-plugin=%wh -passes=winhint -winhint-mode=from-json=%t/num.json -disable-output %t/pc.ll 2>&1 | FileCheck %s --check-prefix=FJNUM
+; FJMISSING: winhint: -winhint-mode=from-json: cannot read {{.*}}none.json
+; FJBAD:     winhint: -winhint-mode=from-json: [2:0, byte=2]: Expected object key
+; FJNUM:     winhint: -winhint-mode=from-json: unrecognized region map format
+;
+; (5) from-json map forms. Array of objects keyed by "region"/"id" (W < 0 and
+;     config < 0 release the window, W/rob/w are entries, config indices are
+;     clamped to the table; non-objects and entries without an id are
+;     skipped) and object keyed by id ("release", negative index, index,
+;     {"window"}; non-numeric keys and unknown values are skipped).
+; RUN: echo '[{"region": 0, "W": -1}, {"id": 1, "config": -2}, {"region": 2, "rob": 100}, "x", {"foo": 1}, {"region": 3, "best_config": 99}, {"region": 4, "w": 7}]' > %t/arr.json
+; RUN: echo '{"0": "release", "1": -1, "2": 1, "abc": 2, "3": "big", "4": {"window": 128}}' > %t/obj.json
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-mode=from-json=%t/arr.json -winhint-target=%machine -winhint-stats-file=%t/arr.out.json -disable-output %t/pc.ll
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-mode=from-json=%t/obj.json -winhint-target=%machine -winhint-stats-file=%t/obj.out.json -disable-output %t/pc.ll
+; RUN: %python -c "import json; d=json.load(open('%t/arr.out.json')); s={x['region']: x['value'] for x in d['hints'] if x['kind'] == 'setwin'}; assert s == {0: 0, 1: 0, 2: 100, 3: 256, 4: 7}, s"
+; RUN: %python -c "import json; d=json.load(open('%t/obj.out.json')); s={x['region']: x['value'] for x in d['hints'] if x['kind'] == 'setwin'}; assert s == {0: 0, 1: 0, 2: 128, 4: 128}, s"
+;
+; (6) A map keyed by run-time ids knows only the overflow marker 63 for
+;     every region >= 63 (66 regions: f063..f065 all take entry "63").
+; RUN: %python %S/Inputs/gen_loops.py 66 > %t/many.c
+; RUN: %rvcc -O2 -fno-unroll-loops -S -emit-llvm %t/many.c -o %t/many.ll
+; RUN: echo '{"62": 0, "63": 2}' > %t/m63.json
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-mode=from-json=%t/m63.json -winhint-target=%machine -winhint-stats-file=%t/m63.out.json -disable-output %t/many.ll 2>/dev/null
+; RUN: %python -c "import json; d=json.load(open('%t/m63.out.json')); s={x['function']: x['value'] for x in d['hints'] if x['kind'] == 'setwin'}; assert s == {'f062': 64, 'f063': 192, 'f064': 192, 'f065': 192}, s"
+;
+; (7) Output naming: -winhint-kernel names the files; a bare
+;     -winhint-stats-file name is written to the current directory; an
+;     unwritable -winhint-out-dir is a warning, not an error.
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-target=%machine -winhint-kernel=kern -winhint-out-dir=%t/k -disable-output %t/pc.ll
+; RUN: %python -c "import json; d=json.load(open('%t/k/kern.winhint.json')); r=json.load(open('%t/k/kern.regions.json')); assert d['kernel'] == 'kern' and r['kernel'] == 'kern' and r['num_regions'] == 5, (d['kernel'], r)"
+; RUN: cd %t/cwd && opt -load-pass-plugin=%wh -passes=winhint -winhint-target=%machine -winhint-stats-file=bare.json -disable-output %t/pc.ll
+; RUN: %python -c "import json; assert json.load(open('%t/cwd/bare.json'))['num_regions'] == 5"
+; RUN: echo > %t/afile
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-target=%machine -winhint-out-dir=%t/afile/sub -disable-output %t/pc.ll 2>&1 | FileCheck %s --check-prefix=NOWRITE
+; NOWRITE: winhint: warning: cannot write {{.*}}afile{{/|\\}}sub{{/|\\}}placement_calls.regions.json: Not a directory
+; NOWRITE: winhint: warning: cannot write {{.*}}afile{{/|\\}}sub{{/|\\}}placement_calls.winhint.json: Not a directory
+;
+; (8) A triple without a hint encoding (aarch64): hints are placed but not
+;     inserted, with a warning; call mode works on any triple.
+; RUN: clang --target=aarch64-unknown-linux-gnu -O2 -S -emit-llvm %S/Inputs/placement_calls.c -o %t/a64.ll
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-target=%machine -winhint-stats-file=%t/a64.json -S %t/a64.ll -o %t/a64.out.ll 2>&1 | FileCheck %s --check-prefix=A64
+; RUN: not grep -q winhint.hint %t/a64.out.ll
+; RUN: %python -c "import json; d=json.load(open('%t/a64.json')); assert d['triple'].startswith('aarch64') and d['hints_setwin'] == 0 and d['hints'] and not any(h['emitted'] for h in d['hints']) and d['hints'][0]['encoding'] == 'setwin(64)', d['hints']"
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-emit=call -winhint-target=%machine -winhint-stats-file=%t/a64call.json -S %t/a64.ll -o - | FileCheck %s --check-prefix=A64CALL
+; RUN: %python -c "import json; d=json.load(open('%t/a64call.json')); assert d['emit'] == 'call' and d['hints_setwin'] == len(d['hints']) > 0 and all(h['emitted'] for h in d['hints']), d"
+; A64: winhint: warning: no asm hint encoding for triple 'aarch64-unknown-linux-gnu'; hints are not emitted
+; A64CALL: call void @__winhint_setwin(i32 256)
+;
+; (9) -winhint-min-region-insts=1e9 counts the summarized work of callees:
+;     only a_driver's outer loop (1000 x kstream() > 1e9 instructions) may
+;     be hinted, and it takes kstream's window; -winhint-cp-model=width is
+;     recorded.
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-target=%machine -winhint-min-region-insts=1000000000 -winhint-cp-model=width -winhint-stats-file=%t/min.json -disable-output %t/pc.ll
+; RUN: %python -c "import json; d=json.load(open('%t/min.json')); assert d['min_region_insts'] == 1e9 and d['cp_model'] == 'width', d; h=[(x['function'], x['depth'], x['value']) for x in d['hints']]; assert h == [('a_driver', 1, 256)], h"
+;
+; (10) The analysis through require<winhint-demand>: cached, invalidated by
+;      a transformation (SROA on -O0 IR) and recomputed for the printer.
+; RUN: clang --target=riscv64-unknown-linux-gnu -O0 -Xclang -disable-O0-optnone -S -emit-llvm %S/Inputs/placement_calls.c -o %t/o0.ll
+; RUN: opt -load-pass-plugin=%wh -passes='function(require<winhint-demand>,sroa,print<winhint-demand>)' -debug-pass-manager -disable-output %t/o0.ll 2>&1 | FileCheck %s --check-prefix=INVAL
+; INVAL-LABEL: Running pass: RequireAnalysisPass<winhint::WindowDemandAnalysis, Function> on kstream
+; INVAL-NEXT:  Running analysis: winhint::WindowDemandAnalysis on kstream
+; INVAL:       Running pass: SROAPass on kstream
+; INVAL:       Invalidating analysis: winhint::WindowDemandAnalysis on kstream
+; INVAL-NEXT:  Running pass: winhint::WindowDemandPrinterPass on kstream
+; INVAL-NEXT:  Running analysis: winhint::WindowDemandAnalysis on kstream
+; INVAL:       WINHINT fn=kstream

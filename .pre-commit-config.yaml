@@ -1,0 +1,31 @@
+# Commit gate for WinHint: every commit runs `make validate`, and the commit is refused
+# when it fails. There is no hosted CI; this hook is the gate.
+#
+# Install once per clone (pre-commit comes from the winhint conda env):
+#   make install-hooks
+#
+# `make validate` sets itself up (tooling/bootstrap_venv.sh creates the conda env on first
+# use), then (tooling/winhint.sh validate) checks the toolchain against
+# tooling/versions.lock, runs every host test suite under the coverage gate
+# (tooling/coverage_gate.py: Python, C++ and C each strictly above 90 % of lines), checks the
+# docstrings and builds the documentation site in strict mode. It needs no gem5 build.
+#
+# pre-commit stashes unstaged changes before running the hook, so what is validated is
+# exactly what is being committed.
+#
+# To run the gate without committing:
+#   make validate            # or: pre-commit run --all-files
+
+default_install_hook_types: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      - id: validate
+        name: make validate (env, tests, coverage > 90 % in Python/C++/C, docs)
+        entry: make validate
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+        stages: [pre-commit]

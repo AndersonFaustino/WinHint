@@ -1,0 +1,31 @@
+; B6 (JonesIQ.so) latency classes, CFG and size limits, options
+; (Inputs/jones_paths.ll).
+;
+; RUN: rm -rf %t && mkdir -p %t
+;
+; (1) Integer multiply, FP multiply, llvm.sqrt and call latencies come from
+;     the machine description: the IQ demand of each loop grows when that
+;     latency goes from 1 to 40 cycles; the loop with only adds does not
+;     change. -jones-kernel names the log; the empty loop is no region.
+; RUN: opt -load-pass-plugin=%jq -passes=jones-iq -jones-target=%S/Inputs/machines/fast_ops.json -jones-kernel=fast -jones-out-dir=%t -disable-output %S/Inputs/jones_paths.ll
+; RUN: opt -load-pass-plugin=%jq -passes=jones-iq -jones-target=%S/Inputs/machines/slow_ops.json -jones-kernel=slow -jones-out-dir=%t -disable-output %S/Inputs/jones_paths.ll
+; RUN: %python -c "import json; f, s = (json.load(open('%t/%%s.jones.json' %% k)) for k in ('fast', 'slow')); q = lambda d: {x['function']: x['iq_demand'] for x in d['log']}; a, b = q(f), q(s); assert f['kernel'] == 'fast' and f['target'] == 'fast_ops' and f['regions'] == 5 and 'spin' not in a, f; assert all(b[k] > a[k] for k in ('muli', 'mulf', 'sqrtf', 'callx')) and a['nopreheader'] == b['nopreheader'], (a, b)"
+;
+; (2) A loop without a preheader gets one, and the hint goes at its end.
+; RUN: opt -load-pass-plugin=%jq -passes=jones-iq -jones-target=%machine -S %S/Inputs/jones_paths.ll -o - | FileCheck %s --check-prefix=PH
+; PH-LABEL: define i64 @nopreheader(
+; PH:       loop.preheader:
+; PH-NEXT:    phi i64
+; PH-NEXT:    call void asm sideeffect ".insn i 0x13, 6, x0, x0, {{[0-9]+}}", ""(){{.*}}!winhint.hint
+; PH-NEXT:    br label %loop
+;
+; (3) A straight-line block region (outside loops) takes the line of its
+;     first instruction; its sequence is capped at 384 instructions.
+; RUN: %python -c "print('void big(float *a, float *b) {'); print(''.join('  a[%%d] = a[%%d] * b[%%d] + b[%%d];\n' %% (i, i + 1, i, i + 2) for i in range(120)) + '}')" > %t/big.c
+; RUN: %rvcc -O2 -fno-slp-vectorize -gline-tables-only %jqflags -mllvm -jones-out-dir=%t -c %t/big.c -o %t/big.o
+; RUN: %python -c "import json; d=json.load(open('%t/big.jones.json')); assert [(x['function'], x['region'], x['line'], x['insts']) for x in d['log']] == [('big', 'block', 2, 384)], d"
+;
+; (4) A bad -jones-emit value is a usage error (exit 1, no crash report).
+; RUN: not opt -load-pass-plugin=%jq -passes=jones-iq -jones-emit=bogus -disable-output %S/Inputs/jones_paths.ll 2>&1 | FileCheck %s --check-prefix=BADEMIT
+; BADEMIT:     jones-iq: bad -jones-emit=bogus (expected asm, call or none)
+; BADEMIT-NOT: PLEASE submit a bug report

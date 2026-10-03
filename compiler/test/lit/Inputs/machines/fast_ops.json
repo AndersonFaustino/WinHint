@@ -1,0 +1,1 @@
+{"name": "fast_ops", "latency": {"int_mul": 1, "fp_mul": 1, "fp_sqrt": 1, "call": 1}}

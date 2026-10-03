@@ -1,0 +1,49 @@
+; Regression tests of individual compiler fixes.
+;
+; RUN: rm -rf %t && mkdir -p %t
+;
+; (1) -winhint-emit=none places hints but inserts none: hints_* count only
+;     emitted hints, every `hints` entry has emitted=false, and the pass
+;     preserves all analyses (no "Invalidating analysis" after it).
+; RUN: %rvcc -O2 -S -emit-llvm %inputs/stream.c -o %t/stream.ll
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -debug-pass-manager -winhint-emit=none -winhint-target=%machine -winhint-stats-file=%t/none.json -disable-output %t/stream.ll 2>&1 | FileCheck %s --check-prefix=NONE
+; RUN: %python -c "import json; d=json.load(open('%t/none.json')); h=d['hints']; assert h and d['hints_setwin'] == 0 and d['hints_region'] == 0 and not any(x['emitted'] for x in h), d"
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-target=%machine -winhint-stats-file=%t/asm.json -disable-output %t/stream.ll
+; RUN: %python -c "import json; d=json.load(open('%t/asm.json')); h=d['hints']; assert h and all(x['emitted'] for x in h) and d['hints_setwin'] == len(h), d"
+; NONE:     Running pass: winhint::HintPlacementPass
+; NONE-NOT: Invalidating analysis
+;
+; (2) llvm.<fn>.<vector> intrinsics are summarized by element type
+;     (v2f64 -> exp like f64, v4f32 -> expf like f32).
+; (3) shl by a negative amount in a call-site argument is not evaluated
+;     (UB before): bounded(n) with n = {5,3} << {-62,-61} is bounded by 5.
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machine %S/Inputs/regressions.ll 2>&1 | FileCheck %s --check-prefix=MODEL
+; MODEL-LABEL: function 'exp_f64'
+; MODEL:       body=[[B64:[0-9.]+]] dyn_insts
+; MODEL:       WINHINT fn=exp_f64 {{.*}} CP=[[CP64:[0-9.]+]] RecMII
+; MODEL-LABEL: function 'exp_v2f64'
+; MODEL:       body=[[B64]] dyn_insts
+; MODEL:       WINHINT fn=exp_v2f64 {{.*}} CP=[[CP64]] RecMII
+; MODEL-LABEL: function 'exp_f32'
+; MODEL:       body=[[B32:[0-9.]+]] dyn_insts
+; MODEL:       WINHINT fn=exp_f32 {{.*}} CP=[[CP32:[0-9.]+]] RecMII
+; MODEL-LABEL: function 'exp_v4f32'
+; MODEL:       body=[[B32]] dyn_insts
+; MODEL:       WINHINT fn=exp_v4f32 {{.*}} CP=[[CP32]] RecMII
+; MODEL-LABEL: function 'bounded'
+; MODEL:       trip=5.0 (bound)
+;
+; (4) An empty window table is a fatal configuration error (WinHint and B6).
+; RUN: not opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%S/Inputs/empty_window_machine.json %t/stream.ll 2>&1 | FileCheck %s --check-prefix=EMPTY -DTOOL=winhint
+; RUN: not opt -load-pass-plugin=%jq -passes=jones-iq -disable-output -jones-target=%S/Inputs/empty_window_machine.json %t/stream.ll 2>&1 | FileCheck %s --check-prefix=EMPTY -DTOOL=jones-iq
+; EMPTY: [[TOOL]]: machine description '{{.*}}empty_window_machine.json' has an empty window table
+;
+; (6) B6 kernel name falls back to the module identifier when the source file
+;     name is empty: Inputs/jones_intrinsics.ll -> jones_intrinsics.jones.json.
+; (7) B6 uses the shared target-model loader (warning text, fallback).
+; (8) B6 integer intrinsics take the integer ALU latency: with fp_add = 40
+;     cycles the integer clamp loop needs a smaller IQ than its FP twin.
+; RUN: opt -load-pass-plugin=%jq -passes=jones-iq -disable-output -jones-target=%S/Inputs/slow_fp_machine.json -jones-out-dir=%t/jq %S/Inputs/jones_intrinsics.ll
+; RUN: %python -c "import json; d=json.load(open('%t/jq/jones_intrinsics.jones.json')); r={x['function']: x['iq_demand'] for x in d['log']}; assert d['kernel'] == 'jones_intrinsics' and r['clampi'] < r['clampf'], d"
+; RUN: opt -load-pass-plugin=%jq -passes=jones-iq -disable-output -jones-target=%t/nonexistent.json %S/Inputs/jones_intrinsics.ll 2>&1 | FileCheck %s --check-prefix=JMISSING
+; JMISSING: jones-iq: warning: cannot read {{.*}}nonexistent.json{{.*}}; using the built-in default machine

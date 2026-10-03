@@ -1,0 +1,52 @@
+; Window-demand analysis on hand-written IR (Inputs/demand_paths.ll): shapes
+; that the C inputs compiled at -O2 do not produce.
+;
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machine %S/Inputs/demand_paths.ll 2>&1 | FileCheck %s
+
+; Inline asm and atomicrmw count one instruction each (+ add, icmp, br).
+; CHECK-LABEL: function 'asm_atomic'
+; CHECK:       trip=1000.0 (exact) body=5.0 dyn_insts=5000.0 footprint=0B {{.*}} loads=0 stores=0
+
+; A loop-invariant load hits L1 and never misses.
+; CHECK-LABEL: function 'invariant'
+; CHECK:       load  invariant x1 stride=0.0 fp=4B reuse=4B level=L1D misses/iter=0.000
+; CHECK:       WINHINT fn=invariant {{.*}} L_mem=4.0 D_indep=inf MLP=0.0
+
+; Unknown stride (no call sites): 64 lines assumed ("?"), one miss per
+; iteration, the loop is conservative.
+; CHECK-LABEL: function 'symbolic_stride'
+; CHECK:       load  strided x1 stride=4096.0? {{.*}} level=MEM misses/iter=1.000
+; CHECK:       WINHINT fn=symbolic_stride {{.*}} config=1 (ROB 128) conservative
+
+; The only call site passes s = 0: zero stride, no misses.
+; CHECK-LABEL: function 'zero_stride'
+; CHECK:       load  stream x1 stride=0.0 fp=4B reuse=4B level=L1D misses/iter=0.000
+; CHECK-NOT:   conservative
+; CHECK-LABEL: function 'zero_stride_caller'
+
+; Trip bound from the call site through phi/trunc/zext/sub/mul/add.
+; CHECK-LABEL: function 'tripc'
+; CHECK:       trip=42.0 (bound) body=6.0
+; CHECK-LABEL: function 'tripc_caller'
+
+; A non-constant call-site argument gives no bound: assumed trip, conservative.
+; CHECK-LABEL: function 'tripu'
+; CHECK:       trip=1000.0 (assumed)
+; CHECK:       WINHINT fn=tripu {{.*}} conservative
+
+; A 32 MiB local array: its size, not the 256-byte footprint, decides the level.
+; CHECK-LABEL: function 'local_array'
+; CHECK:       load  stream x1 stride=4.0 fp=256B reuse=none level=MEM misses/iter=0.062
+; CHECK:       WINHINT fn=local_array {{.*}} L_mem=220.0
+
+; Index through a phi in the latch block: indirect, one miss per iteration,
+; next to the stream over Idx.
+; CHECK-LABEL: function 'indirect_merge'
+; CHECK:       load  stream x1 stride=4.0
+; CHECK-NEXT:  load  indirect x1 stride=64.0 fp=4.0MiB reuse=none level=MEM misses/iter=1.000
+
+; A[i] and A[i + d], d unknown: two groups, not one with two members.
+; CHECK-LABEL: function 'two_groups'
+; CHECK:       load  stream x1 stride=4.0 fp=3.9KiB
+; CHECK-NEXT:  load  stream x1 stride=4.0 fp=3.9KiB
+; CHECK-NOT:   x2

@@ -1,0 +1,11 @@
+{"name": "flat",
+ "cpu": {"issue_width": 6, "decode_width": 5, "commit_width": 3, "clock": "1500 MHz",
+         "latency_cycles": {"int_mul": 4, "fp_add": 6, "call": 9},
+         "fu": {"fp_div_units": 0, "int_div_units": 3}},
+ "cache": {"cache_line_size": 32,
+           "l1d_size": "48KiB", "l1d_hit_latency": 5,
+           "l2_size": "2MB", "l2_tag_latency": 6, "l2_data_latency": 8, "l2_response_latency": 2,
+           "l3_size": 16777216, "l3_latency": 42,
+           "l1d_prefetcher": "StridePrefetcher", "l1d_mshrs": 12, "effective_fraction": 0.5},
+ "memory": {"latency_ns": 80},
+ "window": [{"rob": 160, "iq": 70}, {"rob": 40, "lq": 9, "sq": 7}, "not-an-object", {"iq": 3}]}

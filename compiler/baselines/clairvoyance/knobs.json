@@ -1,0 +1,43 @@
+{
+  "baseline": "B8 Clairvoyance (Tran et al., CGO 2017), artifact third_party/clairvoyance",
+  "source": "experiments/swoop/sources/common/SWOOP/Makefile.targets (grid) and Makefile.defaults (pass options)",
+  "usage": "make -C benchmarks ARCH=riscv VARIANT={clairvoyance|winhint_clairvoyance} CV_TYPE=.. CV_UNROLL=.. CV_INDIR=.. [CV_BRANCH_PROB=..]; non-default settings build into <variant>[<cfg>]-cv_<type>-u<unroll>-i<indir>[-bp<p>]",
+  "tuning": "PROPOSAL §8: tune per kernel on the small input with the same budget as WinHint; the artifact itself evaluates the full grid below and keeps the best version per benchmark",
+  "knobs": {
+    "CV_TYPE": {
+      "default": "consv",
+      "values": ["consv", "specsafe", "spec", "multispecsafe", "multispec"],
+      "tunable": true,
+      "pass_options": {
+        "consv": "-dae-swoop -hoist-delinquent=false",
+        "specsafe": "-aggressive-swoop -hoist-delinquent=false",
+        "spec": "-speculative-swoop -hoist-delinquent=false",
+        "multispecsafe": "-aggressive-swoop -hoist-delinquent=false -multi-access",
+        "multispec": "-speculative-swoop -hoist-delinquent=false -multi-access"
+      }
+    },
+    "CV_UNROLL": {
+      "default": 2,
+      "values": [1, 2, 4],
+      "valid_range": [1, 16],
+      "tunable": true,
+      "pass_options": "-single-loop-unroll -unroll N (and -unroll N to the SWOOP pass)"
+    },
+    "CV_INDIR": {
+      "default": 1,
+      "values": [0, 1, 2, 3],
+      "valid_range": [0, 8],
+      "tunable": true,
+      "pass_options": "-indir-thresh N"
+    },
+    "CV_BRANCH_PROB": {
+      "default": 0.9,
+      "values": [0.9],
+      "valid_range": [0.5, 1.0],
+      "tunable": false,
+      "pass_options": "-merge-branches -branch-prob-threshold P (fixed at 0.9 in the artifact recipe)"
+    }
+  },
+  "grid_size": 60,
+  "validated": "all 60 grid points x 15 kernels compile with CV_STRICT=1 (no excluded function) and match plain bit for bit on the small input (native x86-64), 2026-10-01"
+}

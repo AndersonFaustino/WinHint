@@ -1,0 +1,83 @@
+# Conda environment for WinHint.
+#
+#   conda env create -f environment.yml
+#   conda activate winhint
+#   pip install -r requirements-dev.txt -r requirements-docs.txt
+#
+# `tooling/create_conda_env.sh` does all of that (and installs PyTorch for the host's GPU (CUDA/ROCm, else CPU),
+# adds the activation hook and checks the result against tooling/versions.lock);
+# this file is the declarative equivalent for anyone who prefers `conda env create`
+# directly. It lists the toolchain, which is the table in that script, and the
+# Python dependencies that conda packages well; the rest is in requirements*.txt.
+# Nothing is built from source except the research artifacts (gem5, McPAT,
+# Clairvoyance passes, R2-R4 baselines). Version pins must match
+# tooling/versions.lock. The separate envs winhint-llvm38 and winhint-kmod are
+# created only by the script.
+name: winhint
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  # --- Python 3.14 (its packages: requirements*.txt, installed with pip) ------
+  - python=3.14
+  - pip
+
+  # --- coverage and documentation tools (the rest of both: requirements*.txt) ---
+  - gcovr                   # C/C++ coverage gate (gcov / llvm-cov gcov reports)
+  - doxygen=1.18.0          # mkdoxy (the C/C++ API reference)
+
+  # --- LLVM/Clang 23 (all components on the same 23.1.x) ---------------------
+  - clang=23.1.2
+  - clangxx=23.1.2
+  - clang-tools=23.1.2
+  - llvmdev=23.1.2
+  - llvm-tools=23.1.2
+  - lld=23.1.2
+  - compiler-rt=23.1.2
+  - lit=23.1.2                         # llvm-lit; FileCheck/not/count come from llvmdev (libexec/llvm, on PATH)
+  - compiler-rt_linux-riscv64=23.1.2   # RISC-V builtins for clang --target=riscv64
+  # libcxx-devel is not installed: conda-forge's 23.1.2 build requires
+  # gxx_linux-64>=14, which conflicts with GCC 13. The plugin links against
+  # libstdc++ like the conda llvmdev build itself.
+
+  # --- gem5 / McPAT build dependencies --------------------------------------
+  - gxx_linux-64=13
+  - gcc_linux-64=13
+  - scons
+  - m4
+  - zlib
+  - protobuf
+  - gperftools
+  - libpng
+  - libboost-devel
+  - hdf5
+  - pkg-config
+  - ccache
+  - make
+  - cmake
+  - ninja
+  - git
+
+  # --- RISC-V cross toolchain + user-mode QEMU ------------------------------
+  # conda-forge ships the cross GCC only from 15.2 on (no 13.x). The
+  # gcc_linux-riscv64 wrapper metapackage pins gcc_impl_linux-64 to the same
+  # version (conflicts with host GCC 13), so the *_impl packages are used
+  # directly: compiler = riscv64-conda-linux-gnu-gcc / -g++.
+  - gcc_impl_linux-riscv64=15.3
+  - gxx_impl_linux-riscv64=15.3
+  - sysroot_linux-riscv64=2.39
+  - qemu-execve-riscv64     # conda-forge's qemu-user for riscv64 (qemu-riscv64)
+
+  # --- Real-hardware tools ---------------------------------------------------
+  - rust
+  - linux-perf
+  # R3 intel-lpmd build deps (upower-glib has no conda package: hw/baselines/r3_lpmd/upower_stub,
+  # see versions.lock). `glib` (same version as libglib) adds glib-compile-resources and
+  # lib/glib-2.0/include/glibconfig.h, which libglib/glib-tools lack.
+  - libnl
+  - libsystemd
+  - libxml2-devel
+  - libglib=2.90.0
+  - glib=2.90.0
+  - glib-tools=2.90.0
+  # libbpf / bpftool: no conda package on conda-forge (see versions.lock)

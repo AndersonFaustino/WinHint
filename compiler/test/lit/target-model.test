@@ -1,0 +1,97 @@
+; Machine-description loader (compiler/common/TargetModel.cpp, shared by
+; WinHint and B6): every accepted form of the machine JSON, the defaults of
+; the keys a file leaves out, malformed values and the error paths.
+; -winhint-verbose prints the parsed model ("winhint: target ..."); the
+; demand printer shows its effect on the model of a streaming loop
+; (Inputs/stream_loop.ll, 16 MiB arrays).
+;
+; RUN: rm -rf %t && mkdir -p %t
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-verbose -winhint-emit=none -disable-output -winhint-target=%S/Inputs/machines/flat.json -winhint-stats-file=%t/flat.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=FLAT
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-verbose -winhint-emit=none -disable-output -winhint-target=%S/Inputs/machines/nested.json -winhint-stats-file=%t/nested.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=NESTED
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-verbose -winhint-emit=none -disable-output -winhint-target=%S/Inputs/machines/odd_values.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=ODD
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-verbose -winhint-emit=none -disable-output -winhint-target=%S/Inputs/machines/prefetch_obj.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=PFOBJ
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-verbose -winhint-emit=none -disable-output -winhint-target=%S/Inputs/machines/no_prefetch.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=NOPF
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-verbose -winhint-emit=none -disable-output -winhint-target=%S/Inputs/machines/malformed.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=MALFORMED
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-verbose -winhint-emit=none -disable-output -winhint-target=%S/Inputs/machines/not_object.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=NOTOBJ
+; RUN: opt -load-pass-plugin=%wh -passes=winhint -winhint-verbose -winhint-emit=none -disable-output %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=BUILTIN
+;
+; The switch cost and the window table reach the stats JSON.
+; RUN: %python -c "import json; d=json.load(open('%t/flat.json')); assert d['target'] == 'flat' and abs(d['switch_cost_cycles'] - (10 + 160 / 2 / 3)) < 1e-9 and d['window'] == [{'rob': 40, 'iq': 20, 'lq': 9, 'sq': 7}, {'rob': 160, 'iq': 70, 'lq': 40, 'sq': 40}], d"
+; RUN: %python -c "import json; d=json.load(open('%t/nested.json')); assert d['switch_cost_cycles'] == 77 and [w['rob'] for w in d['window']] == [48, 96], d"
+;
+; Effect on the model: with a stride prefetcher a stream is served by L2
+; (flat: L_mem = L2 tag+data+response = 16); "mlp_target" caps the MLP
+; (nested: 3.5 <= MSHRs 4) and the memory level is the nested L3 (33 cycles)
+; at 128-byte lines (0.031 misses per 4-byte access); without a prefetcher
+; the stream goes to memory (14 + 150).
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%S/Inputs/machines/flat.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=MFLAT
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%S/Inputs/machines/nested.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=MNESTED
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%S/Inputs/machines/no_prefetch.json %S/Inputs/stream_loop.ll 2>&1 | FileCheck %s --check-prefix=MNOPF
+
+; gem5 flat cache keys: decode_width stands in for dispatch_width, a MHz
+; clock, latency_ns converted with that clock (80 ns * 1.5 GHz), sizes as
+; strings or numbers, l1d_hit_latency, L2 latency = tag + data + response,
+; cpu.latency_cycles / cpu.fu (0 divide units -> 1), a window array of
+; objects (entries that are not objects or have no "rob" are skipped, the
+; rest sorted by ROB; IQ/LQ/SQ default to ROB/2, ROB/4, ROB/4).
+; FLAT:      winhint: target 'flat': issue=6 dispatch=5 commit=3 clock=1.5GHz line=32 mem=120cyc mshrs=12 prefetch=stride eff=0.5
+; FLAT-NEXT:   caches: L1D=48KiB/5cyc L2=2048KiB/16cyc L3=16384KiB/42cyc
+; FLAT-NEXT:   latency: int_alu=1 int_mul=4 int_div=20 fp_add=6 fp_mul=4 fp_fma=5 fp_div=12 fp_sqrt=24 fp_cvt=3 store=1 branch=1 call=9
+; FLAT-NEXT:   fu: fp_div=1 int_div=3
+; FLAT-NEXT:   knobs: mlp_target=0 switch_cost=36.7
+; FLAT-NEXT:   window: [40/20/9/7] [160/70/40/40]
+; FLAT:      winhint: stream line 0 loop loop: setwin(160)
+
+; Nested caches replace the flat ones ("l2" without a size is skipped;
+; "latency" / "hit_latency_cycles"); dispatch_width wins over decode_width;
+; a unitless clock is GHz; latency.load_hit overrides the L1D latency;
+; mshrs: l1d.mshrs < cache.mshrs < winhint.l1d_mshrs; window.configs;
+; the winhint knobs.
+; NESTED:      winhint: target 'nested': issue=2 dispatch=3 commit=4 clock=3GHz line=128 mem=99cyc mshrs=4 prefetch=stride eff=0.75
+; NESTED-NEXT:   caches: L1D=16KiB/3cyc L3=4096KiB/33cyc
+; NESTED-NEXT:   latency: int_alu=2 int_mul=3 int_div=30 fp_add=4 fp_mul=7 fp_fma=8 fp_div=21 fp_sqrt=31 fp_cvt=4 store=2 branch=2 call=5
+; NESTED-NEXT:   fu: fp_div=4 int_div=1
+; NESTED-NEXT:   knobs: mlp_target=3.5 switch_cost=77
+; NESTED-NEXT:   window: [48/24/12/12] [96/40/30/20]
+
+; Unparsable sizes ("12 XB", "") drop the level, "1g" is GiB; an unknown
+; clock unit keeps the default; "none" prefetcher names are ignored but a
+; "prefetcher" string enables it; parallel window arrays (short iq/lq arrays
+; and non-integer sq entries fall back to the ROB fractions); without "name"
+; the path names the machine; winhint.memory_latency_cycles.
+; ODD:      winhint: target '{{.*}}odd_values.json': issue=8 dispatch=8 commit=4 clock=2GHz line=64 mem=180cyc mshrs=16 prefetch=stride eff=0.75
+; ODD-NEXT:   caches: L3=1048576KiB/50cyc
+; ODD:        knobs: mlp_target=0 switch_cost=26
+; ODD-NEXT:   window: [32/16/8/8] [64/32/16/16] [128/60/30/32]
+
+; A "prefetcher" object enables it; a non-numeric clock keeps the default;
+; memory.latency_cycles; the default window table is kept.
+; PFOBJ:      winhint: target 'prefetch_obj': issue=4 dispatch=4 commit=4 clock=2GHz line=64 mem=120cyc mshrs=16 prefetch=stride eff=0.75
+; PFOBJ-NEXT:   caches: L1D=32KiB/4cyc
+; PFOBJ:        window: [64/32/16/16] [128/64/32/32] [192/96/48/48] [256/128/64/64]
+
+; "prefetcher": "null" overrides l1d_prefetcher; no cache sizes -> default caches.
+; NOPF:      winhint: target 'no_prefetch': {{.*}} prefetch=none
+; NOPF-NEXT:   caches: L1D=32KiB/4cyc L2=256KiB/14cyc
+
+; Malformed JSON / a non-object root: warning, built-in default machine.
+; MALFORMED: winhint: warning: JSON parse error in {{.*}}malformed.json: {{.*}}; using the built-in default machine
+; MALFORMED: winhint: target 'builtin-default':
+; NOTOBJ:    winhint: warning: {{.*}}not_object.json: top-level JSON value is not an object; using the built-in default machine
+; NOTOBJ:    winhint: target 'builtin-default':
+
+; No -winhint-target: the built-in default machine, without a warning.
+; BUILTIN-NOT: warning
+; BUILTIN:     winhint: target 'builtin-default': issue=4 dispatch=4 commit=4 clock=2GHz line=64 mem=150cyc mshrs=16 prefetch=none eff=0.75
+; BUILTIN-NEXT:  caches: L1D=32KiB/4cyc L2=256KiB/14cyc
+; BUILTIN-NEXT:  latency: int_alu=1 int_mul=3 int_div=20 fp_add=4 fp_mul=4 fp_fma=5 fp_div=12 fp_sqrt=24 fp_cvt=3 store=1 branch=1 call=5
+; BUILTIN-NEXT:  fu: fp_div=2 int_div=2
+; BUILTIN-NEXT:  knobs: mlp_target=0 switch_cost=42
+; BUILTIN-NEXT:  window: [64/32/16/16] [128/64/32/32] [192/96/48/48] [256/128/64/64]
+
+; MFLAT:   load  stream x1 stride=4.0 fp=16.0MiB reuse=none level=L2 misses/iter=0.125
+; MFLAT:   WINHINT fn=stream {{.*}} L_mem=16.0 {{.*}} config=1 (ROB 160)
+; MNESTED: load  stream x1 stride=4.0 fp=16.0MiB reuse=none level=L3 misses/iter=0.031
+; MNESTED: WINHINT fn=stream {{.*}} L_mem=33.0 D_indep=320.0 MLP=3.5
+; MNOPF:   load  stream x1 {{.*}} level=MEM misses/iter=0.062
+; MNOPF:   WINHINT fn=stream {{.*}} L_mem=164.0

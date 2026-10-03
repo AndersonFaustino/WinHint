@@ -1,0 +1,78 @@
+Missing return statements in the Clairvoyance artifact (undefined behaviour that GCC >= 8
+turns into fall-through into the next function: opt 3.8 crashed in
+CFGIndirectionCount with 'free(): invalid pointer'). Applied by build.sh to a
+copy of third_party/clairvoyance/compiler/projects under $WINHINT_BUILD/clairvoyance/src;
+the submodule itself is not modified.
+
+diff -ru a/projects/include/Util/Transform/BranchMerge/BranchMerge.h b/projects/include/Util/Transform/BranchMerge/BranchMerge.h
+--- a/projects/include/Util/Transform/BranchMerge/BranchMerge.h	2026-09-30 22:06:14.387585104 -0300
++++ b/projects/include/Util/Transform/BranchMerge/BranchMerge.h	2026-10-01 00:25:00.875669733 -0300
+@@ -95,6 +95,7 @@
+     }
+     return Builder.CreateStore(new_cond, branch_cond);
+   }
++  return nullptr; // WinHint: was missing (UB with GCC >= 8)
+ }
+ 
+ bool minimizeFunctionFromBranchPred(LoopInfo *LI, Function *cF, double threshold);
+diff -ru a/projects/src/SWOOP/Transform/SwoopDAE/SwoopDAE.cpp b/projects/src/SWOOP/Transform/SwoopDAE/SwoopDAE.cpp
+--- a/projects/src/SWOOP/Transform/SwoopDAE/SwoopDAE.cpp	2026-09-30 22:06:14.390219815 -0300
++++ b/projects/src/SWOOP/Transform/SwoopDAE/SwoopDAE.cpp	2026-10-01 00:25:00.876086984 -0300
+@@ -511,6 +511,7 @@
+       ++ToUpdateIter;
+     }
+   }
++  return true; // WinHint: was missing (UB with GCC >= 8); result unused
+ }
+ 
+ bool SwoopDAE::isWorthTransforming(Function &F, list<LoadInst*> &Loads) {
+@@ -738,6 +739,7 @@
+ 
+   // Update loop info and dominator tree
+   LI = &getAnalysis<LoopInfoWrapperPass>(*(MainPhase->F)).getLoopInfo();
++  return true; // WinHint: was missing (UB with GCC >= 8); result unused
+ }
+ 
+ Phase * SwoopDAE::createAccessPhases(vector<Phase *> &AccessPhases,
+diff -ru a/projects/src/SWOOP/Utils/DCEutils.cpp b/projects/src/SWOOP/Utils/DCEutils.cpp
+--- a/projects/src/SWOOP/Utils/DCEutils.cpp	2026-09-30 22:06:14.390466479 -0300
++++ b/projects/src/SWOOP/Utils/DCEutils.cpp	2026-10-01 00:25:00.875752833 -0300
+@@ -31,6 +31,7 @@
+     else
+       bbI++;
+   }
++  return modif; // WinHint: was missing (UB with GCC >= 8)
+ }
+ 
+ bool SimplifyCFGExclude(Function *F, TargetTransformInfo &TTI,
+@@ -51,6 +52,7 @@
+     else
+       bbI++;
+   }
++  return modif; // WinHint: was missing (UB with GCC >= 8)
+ }
+ 
+ void simplifyCFG(Function *F, TargetTransformInfo &TTI) {
+diff -ru a/projects/src/Util/Analysis/AliasUtils.cpp b/projects/src/Util/Analysis/AliasUtils.cpp
+--- a/projects/src/Util/Analysis/AliasUtils.cpp	2026-09-30 22:06:14.390862745 -0300
++++ b/projects/src/Util/Analysis/AliasUtils.cpp	2026-10-01 00:25:00.875820084 -0300
+@@ -40,6 +40,8 @@
+ 
+       return AA->alias(P1, P1Size, P2, P2Size);
+     }
++    // WinHint: was missing (UB with GCC >= 8); unsized P2 -> unknown size.
++    return AA->alias(P1, P1Size, P2, P2Size);
+   }
+ 
+   // Returns the closest alias between store and any of the LoadInsts
+diff -ru a/projects/src/Util/Annotation/CFGIndirectionCount/CFGIndirectionCount.cpp b/projects/src/Util/Annotation/CFGIndirectionCount/CFGIndirectionCount.cpp
+--- a/projects/src/Util/Annotation/CFGIndirectionCount/CFGIndirectionCount.cpp	2026-09-30 22:06:14.391494982 -0300
++++ b/projects/src/Util/Annotation/CFGIndirectionCount/CFGIndirectionCount.cpp	2026-10-01 00:25:00.876157197 -0300
+@@ -98,6 +98,7 @@
+   }
+ 
+   set<Instruction*> Deps;
++  return true; // WinHint: was missing (UB with GCC >= 8); metadata was added
+ }
+ 
+ char CFGIndirectionCount::ID = 0;

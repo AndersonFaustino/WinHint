@@ -1,0 +1,11 @@
+# -*- mode:python -*-
+# WinHint B9: Long-Term Parking (window_policy=ltp). The IEW-side member
+# functions (ltp_iew.cc) need the gem5_v25.1.0.0_zz_ltp.patch hooks.
+
+Import('*')
+
+if env['CONF']['BUILD_ISA']:
+    Source('ltp.cc')
+    Source('ltp_iew.cc')
+    Source('ltp_policy.cc')
+    DebugFlag('LTP', 'WinHint B9 Long-Term Parking')

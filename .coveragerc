@@ -1,0 +1,30 @@
+# Python coverage configuration for the commit gate (tooling/coverage_gate.py, make validate).
+# The gate requires strictly more than 90 % of the lines below to be executed by the
+# pytest suites (one pytest process per tests/ directory, data appended).
+[run]
+# Every Python file under these directories is measured, imported by a test or not.
+source =
+    sim
+    analysis
+    hw
+    tooling
+    compiler/baselines
+omit =
+    # tests and test helpers are not measured
+    */tests/*
+    */conftest.py
+    compiler/test/*
+    # gem5-only: runs inside gem5's embedded Python (imports m5); exercised by
+    # `tooling/winhint.sh test sim` on the RISCV_winhint build
+    sim/se.py
+    # hardware-only: the real-hardware campaign driver needs an Intel hybrid CPU,
+    # RAPL, perf counters and root for most configurations (docs/guide/hardware/index.md §4-5)
+    hw/run_hw_experiments.py
+
+[report]
+show_missing = true
+skip_empty = true
+precision = 2
+
+[html]
+title = WinHint Python coverage

@@ -1,0 +1,10 @@
+# WinHint optional dependencies.
+#
+#   pip install -r requirements-optional.txt
+#
+# WinHint has no optional Python packages, so this file only pulls in the
+# runtime dependencies. It exists so every project offers the same set of files.
+# The optional external pieces (gem5, McPAT, the llama.cpp hooks, the baselines)
+# are built from source by tooling/winhint.sh, not installed with pip.
+
+-r requirements.txt

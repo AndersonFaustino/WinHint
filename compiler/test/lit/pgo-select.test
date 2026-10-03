@@ -1,0 +1,38 @@
+; B7 (compiler/baselines/pgo/pgo_flow.py): `select` turns per-config
+; region_stats.csv files (the gem5 `region_stats.csv` format of
+; docs/interfaces.md §4) into the per-region map consumed by
+; -winhint-mode=from-json, and the `pgo` build emits region(id) + setwin(W)
+; with W = ROB of the selected configuration.
+;   region 0: fastest at config 3, much slower when smaller -> config 3 (W 256)
+;   region 1: same cycles for every config -> ties go to the smallest (W 64)
+;   region 2: never visited on the profiling input -> no hint (default window)
+;
+; RUN: rm -rf %t && mkdir -p %t/runs/cfg0 %t/runs/cfg1 %t/runs/cfg2 %t/runs/cfg3
+; RUN: printf 'region,config,enter_cycle,cycles,insts\n0,0,0,4000,1000\n1,0,5000,1000,1000\n1,0,9000,1000,1000\n' > %t/runs/cfg0/region_stats.csv
+; RUN: printf 'region,config,enter_cycle,cycles,insts\n0,1,0,3000,1000\n1,1,5000,2000,2000\n' > %t/runs/cfg1/region_stats.csv
+; RUN: printf 'region,config,enter_cycle,cycles,insts\n0,2,0,2000,1000\n1,2,5000,2000,2000\n' > %t/runs/cfg2/region_stats.csv
+; RUN: printf 'region,config,enter_cycle,cycles,insts\n0,3,0,1000,1000\n1,3,5000,2000,2000\n' > %t/runs/cfg3/region_stats.csv
+; RUN: echo '{"regions": {"0": {"function": "f", "line": 3}, "1": {"function": "g", "line": 7}, "2": {"function": "h", "line": 9}}}' > %t/k.regions.json
+; RUN: %python %root/compiler/baselines/pgo/pgo_flow.py select --kernel k --stats %t/runs --regions %t/k.regions.json --machine %machine --out %t/k.json 2> %t/err
+; RUN: FileCheck %s --check-prefix=NOTE < %t/err
+; RUN: %python -c "import json; d=json.load(open('%t/k.json')); r=d['regions']; assert (r['0']['config'], r['0']['W'], r['1']['config'], r['1']['W']) == (3, 256, 0, 64), r; assert '2' not in r and d['unprofiled_regions'] == [2], d; assert r['0']['function'] == 'f'"
+; The pgo build consumes the map (benchmarks/Makefile: -winhint-mode=from-json=$(PGO_DIR)/<kernel>.json).
+; RUN: %rvcc -O2 -fno-unroll-loops -fno-vectorize %whflags -mllvm -winhint-mode=from-json=%t/k.json -c %S/Inputs/pgo_regions.c -o %t/k.o
+; RUN: llvm-objdump -d %t/k.o | FileCheck %s --check-prefix=RV
+; RUN: %python %root/compiler/baselines/pgo/pgo_flow.py all --kernel k --dry-run --arch riscv > %t/dry
+; RUN: FileCheck %s --check-prefix=DRY < %t/dry
+
+; NOTE: regions [2] were not visited on the profiling input
+; RV-LABEL: <f>:
+; RV:       01706013 {{.*}}ori zero, zero, 0x17
+; RV:       41506013 {{.*}}ori zero, zero, 0x415
+; RV-LABEL: <g>:
+; RV:       03706013 {{.*}}ori zero, zero, 0x37
+; RV:       11506013 {{.*}}ori zero, zero, 0x115
+; RV-LABEL: <h>:
+; RV:       05706013 {{.*}}ori zero, zero, 0x57
+; RV-NOT:   506013
+; DRY: make -C {{.*}}benchmarks -j1 ARCH=riscv VARIANT=oracle KERNELS=k
+; DRY: flock {{.*}}.heavy.lock {{.*}}gem5.opt --outdir={{.*}}cfg0 {{.*}}se.py --machine {{.*}} --options small --window-policy static --window-initial 0
+; DRY: --window-initial 3
+; DRY: make -C {{.*}}benchmarks -j1 ARCH=riscv VARIANT=pgo KERNELS=k {{.*}}PGO_DIR=

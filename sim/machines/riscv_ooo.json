@@ -1,0 +1,121 @@
+{
+  "_comment": "WinHint default machine: 4-wide RISC-V out-of-order core (gem5 SE)",
+  "name": "riscv_ooo",
+  "cpu": {
+    "type": "DerivO3CPU",
+    "clock": "2GHz",
+    "fetch_width": 4,
+    "decode_width": 4,
+    "rename_width": 4,
+    "dispatch_width": 4,
+    "issue_width": 4,
+    "commit_width": 4,
+    "squash_width": 4,
+    "wb_width": 8,
+    "num_int_regs": 288,
+    "num_fp_regs": 288,
+    "num_rob_entries": 256,
+    "num_iq_entries": 128,
+    "lq_entries": 64,
+    "sq_entries": 64,
+    "_regs_comment": "physical regs = 32 arch + largest ROB, so the register file never binds before the window",
+    "latency_cycles": {
+      "int_alu": 1,
+      "int_mul": 3,
+      "int_div": 20,
+      "fp_add": 2,
+      "fp_mul": 4,
+      "fp_fma": 5,
+      "fp_div": 12,
+      "fp_sqrt": 24,
+      "load_hit": 4,
+      "branch_mispredict": 12
+    }
+  },
+  "cache": {
+    "l1i_size": "32kB",
+    "l1d_size": "32kB",
+    "l2_size": "1MB",
+    "cache_line_size": 64,
+    "line_size": 64,
+    "l1i": {
+      "size": "32kB",
+      "assoc": 4,
+      "tag_latency": 1,
+      "data_latency": 1,
+      "response_latency": 1,
+      "mshrs": 8,
+      "tgts_per_mshr": 20,
+      "hit_latency_cycles": 2
+    },
+    "l1d": {
+      "size": "32kB",
+      "assoc": 8,
+      "tag_latency": 2,
+      "data_latency": 2,
+      "response_latency": 1,
+      "mshrs": 16,
+      "tgts_per_mshr": 20,
+      "hit_latency_cycles": 4
+    },
+    "l2": {
+      "size": "1MB",
+      "assoc": 16,
+      "tag_latency": 10,
+      "data_latency": 10,
+      "response_latency": 4,
+      "mshrs": 32,
+      "tgts_per_mshr": 12,
+      "hit_latency_cycles": 20
+    },
+    "l1d_prefetcher": "none"
+  },
+  "memory": {
+    "mem_size": "512MB",
+    "mem_type": "DDR4_2400_8x8",
+    "type": "DDR4_2400_8x8",
+    "size": "512MB",
+    "extra_latency_ns": 0,
+    "latency_cycles": 200,
+    "_comment": "latency_cycles is the cost-model estimate of an L2-miss round trip (DRAM + controller + extra_latency_ns); gem5 models it in detail"
+  },
+  "window": {
+    "rob": [
+      64,
+      128,
+      192,
+      256
+    ],
+    "iq": [
+      32,
+      64,
+      96,
+      128
+    ],
+    "lq": [
+      16,
+      32,
+      48,
+      64
+    ],
+    "sq": [
+      16,
+      32,
+      48,
+      64
+    ],
+    "initial": 3,
+    "period": 1000,
+    "_comment": "config i scales ROB/IQ/LQ/SQ together; setwin(W) picks the smallest config with rob >= W (W=0 or too large -> largest)"
+  },
+  "rob": {
+    "_comment": "legacy keys read by sim/run_baseline.py",
+    "default_size": 256,
+    "sweep_sizes": [
+      64,
+      128,
+      192,
+      256
+    ]
+  }
+}

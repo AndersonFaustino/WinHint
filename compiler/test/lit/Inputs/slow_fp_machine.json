@@ -1,0 +1,2 @@
+{"name": "slow_fp", "latency": {"int_alu": 1, "fp_add": 40},
+ "window": {"rob": [64, 128, 192, 256], "iq": [32, 64, 96, 128]}}

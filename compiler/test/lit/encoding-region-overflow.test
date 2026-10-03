@@ -1,0 +1,38 @@
+; Region ids at the top of the 6-bit payload: 66 regions -> ids 0..65; region(62)
+; and region(63) are encoded as such, ids >= 63 share the overflow marker
+; region(63) (RISC-V word 0x7f706013, x86 disp 0x5748203f), with a warning and
+; "overflow": true / "encoded_id": 63 in <kernel>.regions.json.
+;
+; RUN: rm -rf %t && mkdir -p %t
+; RUN: %python %S/Inputs/gen_loops.py 66 > %t/many.c
+; RUN: %rvcc -O2 -fno-unroll-loops %whflags -mllvm -winhint-mode=regions -mllvm -winhint-out-dir=%t -c %t/many.c -o %t/rv.o 2> %t/rv.err
+; RUN: FileCheck %s --check-prefix=WARN < %t/rv.err
+; RUN: llvm-objdump -d %t/rv.o | FileCheck %s --check-prefix=RV
+; RUN: %x86cc -O2 -fno-unroll-loops -fno-vectorize %whflags -mllvm -winhint-mode=regions -c %t/many.c -o %t/x86.o 2>/dev/null
+; RUN: llvm-objdump -d %t/x86.o | FileCheck %s --check-prefix=X86
+; RUN: %python -c "import json; d=json.load(open('%t/many.regions.json')); r=d['regions']; assert d['num_regions'] == 66 and d['overflow'] is True; assert [r[str(i)]['encoded_id'] for i in (0, 62, 63, 64, 65)] == [0, 62, 63, 63, 63], r; assert r['65']['function'] == 'f065'"
+
+; WARN: winhint: warning: 66 regions; ids >= 63 share the overflow marker region(63)
+
+; RV-LABEL: <f000>:
+; RV:       01706013 {{.*}}ori zero, zero, 0x17
+; RV-LABEL: <f001>:
+; RV:       03706013 {{.*}}ori zero, zero, 0x37
+; RV-LABEL: <f062>:
+; RV:       7d706013 {{.*}}ori zero, zero, 0x7d7
+; RV-LABEL: <f063>:
+; RV:       7f706013 {{.*}}ori zero, zero, 0x7f7
+; RV-LABEL: <f064>:
+; RV:       7f706013 {{.*}}ori zero, zero, 0x7f7
+; RV-LABEL: <f065>:
+; RV:       7f706013 {{.*}}ori zero, zero, 0x7f7
+; RV-NOT:   ori zero, zero
+
+; X86-LABEL: <f000>:
+; X86:       0f 1f 80 00 20 48 57 {{.*}}nopl 0x57482000(%rax)
+; X86-LABEL: <f062>:
+; X86:       0f 1f 80 3e 20 48 57 {{.*}}nopl 0x5748203e(%rax)
+; X86-LABEL: <f063>:
+; X86:       0f 1f 80 3f 20 48 57 {{.*}}nopl 0x5748203f(%rax)
+; X86-LABEL: <f065>:
+; X86:       0f 1f 80 3f 20 48 57 {{.*}}nopl 0x5748203f(%rax)

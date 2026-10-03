@@ -1,0 +1,535 @@
+diff --git a/src/cpu/o3/BaseO3CPU.py b/src/cpu/o3/BaseO3CPU.py
+index 3c477c1..8bb4f8f 100644
+--- a/src/cpu/o3/BaseO3CPU.py
++++ b/src/cpu/o3/BaseO3CPU.py
+@@ -187,6 +187,28 @@ class BaseO3CPU(BaseCPU):
+     instQueues = VectorParam.IQUnit(IQUnit(), "Vector of IQs")
+     numROBEntries = Param.Unsigned(192, "Number of reorder buffer entries")
+ 
++    # WinHint window resizing (docs/interfaces.md section 4). The physical
++    # ROB/IQ/LQ/SQ must hold the largest configuration. An empty table means
++    # a single configuration equal to the physical sizes (no resizing).
++    window_policy = Param.String(
++        "static",
++        "Window decision policy: static, occupancy, mlp, bbv, lut, hint, "
++        "hybrid, ltp (a string: 'static' is a C++ keyword)",
++    )
++    window_args = Param.String("", "Policy tunables, 'k=v,k=v'")
++    window_rob = VectorParam.Unsigned([], "Window config table: ROB caps")
++    window_iq = VectorParam.Unsigned([], "Window config table: IQ caps")
++    window_lq = VectorParam.Unsigned([], "Window config table: LQ caps")
++    window_sq = VectorParam.Unsigned([], "Window config table: SQ caps")
++    window_initial = Param.Unsigned(
++        0, "Starting config index (static: the fixed one)"
++    )
++    window_period = Param.Cycles(1000, "Sampling period (cycles)")
++    window_lut_file = Param.String("", "B5 runtime LUT file")
++    window_trace = Param.Bool(False, "Write window_trace.csv to the outdir")
++    window_l1d = Param.BaseCache(NULL, "L1D whose miss counters feed MLP")
++    window_l2 = Param.BaseCache(NULL, "L2 whose miss counters feed policies")
++
+     smtNumFetchingThreads = Param.Unsigned(1, "SMT Number of Fetching Threads")
+     smtFetchPolicy = Param.SMTFetchPolicy("RoundRobin", "SMT Fetch policy")
+     smtLSQPolicy = Param.SMTQueuePolicy(
+diff --git a/src/cpu/o3/commit.hh b/src/cpu/o3/commit.hh
+index 5f978c8..cc567dd 100644
+--- a/src/cpu/o3/commit.hh
++++ b/src/cpu/o3/commit.hh
+@@ -214,6 +214,15 @@ class Commit
+     /** Returns the number of free ROB entries for a specific thread. */
+     size_t numROBFreeEntries(ThreadID tid);
+ 
++    /** WinHint: re-broadcast the free ROB entries to rename next cycle
++     * (the window cap changed). */
++    void
++    windowCapsChanged()
++    {
++        for (ThreadID tid = 0; tid < MaxThreads; tid++)
++            changedROBNumEntries[tid] = true;
++    }
++
+     /** Generates an event to schedule a squash due to a trap. */
+     void generateTrapEvent(ThreadID tid, Fault inst_fault);
+ 
+diff --git a/src/cpu/o3/cpu.cc b/src/cpu/o3/cpu.cc
+index ad539e7..e0f4af6 100644
+--- a/src/cpu/o3/cpu.cc
++++ b/src/cpu/o3/cpu.cc
+@@ -320,6 +320,8 @@ CPU::CPU(const BaseO3CPUParams &params)
+         fatal("O3CPU %s has no interrupt controller.\n"
+               "Ensure createInterruptController() is called.\n", name());
+     }
++
++    window = std::make_unique<WindowController>(this, params);
+ }
+ 
+ void
+@@ -403,6 +405,8 @@ CPU::tick()
+         cleanUpRemovedInsts();
+     }
+ 
++    window->tick();
++
+     if (!tickEvent.scheduled()) {
+         if (_status == SwitchedOut) {
+             DPRINTF(O3CPU, "Switched out!\n");
+@@ -453,6 +457,8 @@ CPU::startup()
+     iew.startupStage();
+     rename.startupStage();
+     commit.startupStage();
++
++    window->startup();
+ }
+ 
+ void
+@@ -1174,6 +1180,8 @@ CPU::instDone(ThreadID tid, const DynInstPtr &inst)
+     commitStats[tid]->numOpsNotNOP++;
+ 
+     probeInstCommit(inst->staticInst, inst->pcState().instAddr());
++
++    window->commitInst(inst);
+ }
+ 
+ void
+diff --git a/src/cpu/o3/cpu.hh b/src/cpu/o3/cpu.hh
+index faa31d6..e5bffb4 100644
+--- a/src/cpu/o3/cpu.hh
++++ b/src/cpu/o3/cpu.hh
+@@ -68,6 +68,7 @@
+ #include "cpu/o3/rob.hh"
+ #include "cpu/o3/scoreboard.hh"
+ #include "cpu/o3/thread_state.hh"
++#include "cpu/o3/window/controller.hh"
+ #include "cpu/simple_thread.hh"
+ #include "cpu/timebuf.hh"
+ #include "params/BaseO3CPU.hh"
+@@ -447,6 +448,17 @@ class CPU : public BaseCPU
+     /** The re-order buffer. */
+     ROB rob;
+ 
++    /** WinHint: window-resizing controller (ROB/IQ/LQ/SQ caps, hints,
++     * per-period sampling, policies). Created in the constructor. */
++    std::unique_ptr<WindowController> window;
++    friend class WindowController;
++
++  public:
++    /** WinHint: the window controller (set in the constructor). */
++    WindowController *windowCtrl() const { return window.get(); }
++
++  protected:
++
+     /** Active Threads List */
+     std::list<ThreadID> activeThreads;
+ 
+diff --git a/src/cpu/o3/iew.hh b/src/cpu/o3/iew.hh
+index c62a3dc..dfc12fa 100644
+--- a/src/cpu/o3/iew.hh
++++ b/src/cpu/o3/iew.hh
+@@ -296,6 +296,10 @@ class IEW
+      */
+     void tick();
+ 
++    /** WinHint: re-broadcast free IQ/LQ/SQ entries to rename next cycle
++     * (the window caps changed). */
++    void windowCapsChanged() { updateLSQNextCycle = true; }
++
+   private:
+     /** Updates execution stats based on the instruction. */
+     void updateExeInstStats(const DynInstPtr &inst);
+diff --git a/src/cpu/o3/inst_queue.cc b/src/cpu/o3/inst_queue.cc
+index dd26eca..c8100ce 100644
+--- a/src/cpu/o3/inst_queue.cc
++++ b/src/cpu/o3/inst_queue.cc
+@@ -71,6 +71,7 @@ IQUnit::IQUnit(const IQUnitParams &params)
+       activeThreads(nullptr),
+       _freeEntries(params.numEntries),
+       _numEntries(params.numEntries),
++      capEntries(params.numEntries),
+       _fuPool(params.fuPool)
+ {
+     assert(_fuPool);
+@@ -606,6 +607,48 @@ InstructionQueue::numFreeEntries(const DynInstPtr &inst)
+     return free_entries;
+ }
+ 
++unsigned
++InstructionQueue::physEntries() const
++{
++    unsigned n = 0;
++    for (auto iq : iqs)
++        n += iq->numEntries();
++    return n;
++}
++
++unsigned
++InstructionQueue::occupancy() const
++{
++    unsigned n = 0;
++    for (auto iq : iqs)
++        n += iq->occupancy();
++    return n;
++}
++
++unsigned
++InstructionQueue::getCap() const
++{
++    unsigned n = 0;
++    for (auto iq : iqs)
++        n += iq->getCap();
++    return n;
++}
++
++void
++InstructionQueue::setCap(unsigned cap)
++{
++    const unsigned phys = std::max(1u, physEntries());
++    for (auto iq : iqs) {
++        if (iqs.size() == 1) {
++            iq->setCap(cap);
++        } else {
++            uint64_t share =
++                ((uint64_t)cap * iq->numEntries() + phys / 2) / phys;
++            iq->setCap((unsigned)share);
++        }
++    }
++}
++
+ // Might want to do something more complex if it knows how many instructions
+ // will be issued this cycle.
+ bool
+diff --git a/src/cpu/o3/inst_queue.hh b/src/cpu/o3/inst_queue.hh
+index 844521c..5805fdb 100644
+--- a/src/cpu/o3/inst_queue.hh
++++ b/src/cpu/o3/inst_queue.hh
+@@ -42,6 +42,7 @@
+ #ifndef __CPU_O3_INST_QUEUE_HH__
+ #define __CPU_O3_INST_QUEUE_HH__
+ 
++#include <algorithm>
+ #include <list>
+ #include <map>
+ #include <queue>
+@@ -96,15 +97,27 @@ class IQUnit : public SimObject
+     unsigned
+     numFreeEntries() const
+     {
+-        return _freeEntries;
++        return std::min(_freeEntries, capFree());
+     }
+ 
+     unsigned
+     numFreeEntries(ThreadID tid) const
+     {
+-        return maxEntries[tid] - count[tid];
++        return std::min(maxEntries[tid] - count[tid], capFree());
+     }
+ 
++    /** WinHint: per-unit window cap (1.._numEntries). */
++    void
++    setCap(unsigned cap)
++    {
++        capEntries = std::max(1u, std::min(cap, _numEntries));
++    }
++
++    unsigned getCap() const { return capEntries; }
++
++    /** Occupied entries (all threads). */
++    unsigned occupancy() const { return _numEntries - _freeEntries; }
++
+     unsigned numFreeEntries(const DynInstPtr &inst) const;
+ 
+     /** Returns the number of used entries for a thread. */
+@@ -148,6 +161,17 @@ class IQUnit : public SimObject
+     /** The number of entries in the instruction queue. */
+     unsigned _numEntries;
+ 
++    /** WinHint window cap (== _numEntries when not resized). */
++    unsigned capEntries;
++
++    /** Entries left under the window cap (never underflows). */
++    unsigned
++    capFree() const
++    {
++        unsigned occ = _numEntries - _freeEntries;
++        return occ >= capEntries ? 0 : capEntries - occ;
++    }
++
+     /** Max IQ Entries Per Thread */
+     unsigned maxEntries[MaxThreads];
+ 
+@@ -252,6 +276,20 @@ class InstructionQueue
+     /** Returns number of free entries for a thread. */
+     unsigned numFreeEntries(const DynInstPtr &inst);
+ 
++    /** WinHint: total physical entries over all IQ units. */
++    unsigned physEntries() const;
++
++    /** WinHint: total occupied entries over all IQ units. */
++    unsigned occupancy() const;
++
++    /** WinHint: total cap over all IQ units. */
++    unsigned getCap() const;
++
++    /** WinHint: cap the IQ at `cap` entries in total. With several IQ
++     * units each unit gets a share proportional to its physical size
++     * (at least 1 entry). */
++    void setCap(unsigned cap);
++
+     /** Returns whether or not the IQ is full. */
+     bool isFull();
+ 
+diff --git a/src/cpu/o3/lsq.cc b/src/cpu/o3/lsq.cc
+index da04dc5..d6d2b4f 100644
+--- a/src/cpu/o3/lsq.cc
++++ b/src/cpu/o3/lsq.cc
+@@ -572,6 +572,25 @@ LSQ::numFreeStoreEntries()
+     return total;
+ }
+ 
++void
++LSQ::setCaps(unsigned lq, unsigned sq)
++{
++    for (auto &t : thread)
++        t.setCaps(lq, sq);
++}
++
++unsigned
++LSQ::getLQCap() const
++{
++    return thread.empty() ? 0 : thread.front().getLQCap();
++}
++
++unsigned
++LSQ::getSQCap() const
++{
++    return thread.empty() ? 0 : thread.front().getSQCap();
++}
++
+ unsigned
+ LSQ::numFreeLoadEntries(ThreadID tid)
+ {
+diff --git a/src/cpu/o3/lsq.hh b/src/cpu/o3/lsq.hh
+index c208a9f..ad09b81 100644
+--- a/src/cpu/o3/lsq.hh
++++ b/src/cpu/o3/lsq.hh
+@@ -794,6 +794,11 @@ class LSQ
+     uint64_t getLatestHtmUid(ThreadID tid) const;
+     void setLastRetiredHtmUid(ThreadID tid, uint64_t htmUid);
+ 
++    /** WinHint: cap every thread's LQ/SQ (see LSQUnit::setCaps). */
++    void setCaps(unsigned lq, unsigned sq);
++    unsigned getLQCap() const;
++    unsigned getSQCap() const;
++
+     /** Returns the number of free load entries. */
+     unsigned numFreeLoadEntries();
+ 
+diff --git a/src/cpu/o3/lsq_unit.cc b/src/cpu/o3/lsq_unit.cc
+index 67ae692..743e20a 100644
+--- a/src/cpu/o3/lsq_unit.cc
++++ b/src/cpu/o3/lsq_unit.cc
+@@ -190,6 +190,7 @@ LSQUnit::completeDataAccess(PacketPtr pkt)
+ 
+ LSQUnit::LSQUnit(uint32_t lqEntries, uint32_t sqEntries)
+     : lsqID(-1), storeQueue(sqEntries), loadQueue(lqEntries),
++      lqCap(lqEntries), sqCap(sqEntries),
+       storesToWB(0),
+       htmStarts(0), htmStops(0),
+       lastRetiredHtmUid(0),
+@@ -427,7 +428,8 @@ LSQUnit::numFreeLoadEntries()
+ {
+         DPRINTF(LSQUnit, "LQ size: %d, #loads occupied: %d\n",
+                 loadQueue.capacity(), loadQueue.size());
+-        return loadQueue.capacity() - loadQueue.size();
++        return std::min<unsigned>(loadQueue.capacity() - loadQueue.size(),
++                                  capLeft(loadQueue.size(), lqCap));
+ }
+ 
+ unsigned
+@@ -435,7 +437,8 @@ LSQUnit::numFreeStoreEntries()
+ {
+         DPRINTF(LSQUnit, "SQ size: %d, #stores occupied: %d\n",
+                 storeQueue.capacity(), storeQueue.size());
+-        return storeQueue.capacity() - storeQueue.size();
++        return std::min<unsigned>(storeQueue.capacity() - storeQueue.size(),
++                                  capLeft(storeQueue.size(), sqCap));
+ 
+  }
+ 
+diff --git a/src/cpu/o3/lsq_unit.hh b/src/cpu/o3/lsq_unit.hh
+index 40003ce..f935650 100644
+--- a/src/cpu/o3/lsq_unit.hh
++++ b/src/cpu/o3/lsq_unit.hh
+@@ -341,10 +341,18 @@ class LSQUnit
+     bool isEmpty() const { return lqEmpty() && sqEmpty(); }
+ 
+     /** Returns if the LQ is full. */
+-    bool lqFull() { return loadQueue.full(); }
++    bool
++    lqFull()
++    {
++        return loadQueue.full() || capLeft(loadQueue.size(), lqCap) == 0;
++    }
+ 
+     /** Returns if the SQ is full. */
+-    bool sqFull() { return storeQueue.full(); }
++    bool
++    sqFull()
++    {
++        return storeQueue.full() || capLeft(storeQueue.size(), sqCap) == 0;
++    }
+ 
+     /** Returns if the LQ is empty. */
+     bool lqEmpty() const { return loadQueue.size() == 0; }
+@@ -465,6 +473,29 @@ class LSQUnit
+     /** The load queue. */
+     LoadQueue loadQueue;
+ 
++  private:
++    /** WinHint window caps (== capacity when not resized). */
++    unsigned lqCap;
++    unsigned sqCap;
++
++    static unsigned
++    capLeft(size_t occ, unsigned cap)
++    {
++        return occ >= cap ? 0 : cap - (unsigned)occ;
++    }
++
++  public:
++    /** WinHint: cap the LQ/SQ (each clamped to 1..capacity). Free entries
++     * become min(physical free, cap - occupancy). */
++    void
++    setCaps(unsigned lq, unsigned sq)
++    {
++        lqCap = std::max(1u, std::min(lq, (unsigned)loadQueue.capacity()));
++        sqCap = std::max(1u, std::min(sq, (unsigned)storeQueue.capacity()));
++    }
++    unsigned getLQCap() const { return lqCap; }
++    unsigned getSQCap() const { return sqCap; }
++
+   private:
+     /** The number of places to shift addresses in the LSQ before checking
+      * for dependency violations
+diff --git a/src/cpu/o3/rob.cc b/src/cpu/o3/rob.cc
+index 57a28cc..f25b2ab 100644
+--- a/src/cpu/o3/rob.cc
++++ b/src/cpu/o3/rob.cc
+@@ -59,6 +59,7 @@ ROB::ROB(CPU *_cpu, const BaseO3CPUParams &params)
+     : robPolicy(params.smtROBPolicy),
+       cpu(_cpu),
+       numEntries(params.numROBEntries),
++      capEntries(params.numROBEntries),
+       squashWidth(params.squashWidth),
+       numInstsInROB(0),
+       numThreads(params.numThreads),
+@@ -287,13 +288,13 @@ ROB::canCommit()
+ unsigned
+ ROB::numFreeEntries()
+ {
+-    return numEntries - numInstsInROB;
++    return std::min(numEntries - numInstsInROB, capFree());
+ }
+ 
+ unsigned
+ ROB::numFreeEntries(ThreadID tid)
+ {
+-    return maxEntries[tid] - threadEntries[tid];
++    return std::min(maxEntries[tid] - threadEntries[tid], capFree());
+ }
+ 
+ void
+diff --git a/src/cpu/o3/rob.hh b/src/cpu/o3/rob.hh
+index a5e3779..7ca2ace 100644
+--- a/src/cpu/o3/rob.hh
++++ b/src/cpu/o3/rob.hh
+@@ -41,6 +41,7 @@
+ #ifndef __CPU_O3_ROB_HH__
+ #define __CPU_O3_ROB_HH__
+ 
++#include <algorithm>
+ #include <string>
+ #include <utility>
+ #include <vector>
+@@ -182,13 +183,22 @@ class ROB
+     unsigned getThreadEntries(ThreadID tid)
+     { return threadEntries[tid]; }
+ 
+-    /** Returns if the ROB is full. */
++    /** Returns if the ROB is full (WinHint: or at its window cap). */
+     bool isFull()
+-    { return numInstsInROB == numEntries; }
++    { return numInstsInROB == numEntries || capFree() == 0; }
+ 
+     /** Returns if a specific thread's partition is full. */
+     bool isFull(ThreadID tid)
+-    { return threadEntries[tid] == numEntries; }
++    { return threadEntries[tid] == numEntries || capFree() == 0; }
++
++    /** WinHint: window cap (1..numEntries). Free entries are
++     * min(physical free, cap - occupancy); dispatch stalls until the
++     * occupancy drains below a smaller cap (no flush). */
++    void setCap(unsigned cap)
++    { capEntries = std::max(1u, std::min(cap, numEntries)); }
++    unsigned getCap() const { return capEntries; }
++    unsigned physEntries() const { return numEntries; }
++    unsigned occupancy() const { return (unsigned)numInstsInROB; }
+ 
+     /** Returns if the ROB is empty. */
+     bool isEmpty() const
+@@ -279,6 +289,16 @@ class ROB
+     /** Number of instructions in the ROB. */
+     unsigned numEntries;
+ 
++    /** WinHint window cap (== numEntries when not resized). */
++    unsigned capEntries;
++
++    /** Entries left under the window cap (never underflows). */
++    unsigned capFree() const
++    {
++        unsigned occ = (unsigned)numInstsInROB;
++        return occ >= capEntries ? 0 : capEntries - occ;
++    }
++
+     /** Entries Per Thread */
+     unsigned threadEntries[MaxThreads];
+ 
+diff --git a/src/mem/cache/base.hh b/src/mem/cache/base.hh
+index df9e89e..bcac488 100644
+--- a/src/mem/cache/base.hh
++++ b/src/mem/cache/base.hh
+@@ -1152,6 +1152,17 @@ class BaseCache : public ClockedObject
+     void regProbePoints() override;
+ 
+   public:
++    /** WinHint: demand misses so far (cumulative; the O3 window
++     * controller takes per-period deltas). */
++    double windowDemandMisses() const { return stats.demandMisses.total(); }
++
++    /** WinHint: allocated MSHRs, i.e. outstanding misses (for MLP). */
++    unsigned
++    windowOutstandingMisses() const
++    {
++        return (unsigned)mshrQueue.numAllocated();
++    }
++
+     BaseCache(const BaseCacheParams &p, unsigned blk_size);
+     ~BaseCache();
+ 
+diff --git a/src/mem/cache/queue.hh b/src/mem/cache/queue.hh
+index 9a770d1..f73d4fc 100644
+--- a/src/mem/cache/queue.hh
++++ b/src/mem/cache/queue.hh
+@@ -157,6 +157,12 @@ class Queue : public Drainable, public Named
+         return _numInService;
+     }
+ 
++    /** WinHint: number of allocated entries (outstanding misses). */
++    int numAllocated() const
++    {
++        return allocated;
++    }
++
+     /**
+      * Find the first entry that matches the provided address.
+      *

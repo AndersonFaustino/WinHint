@@ -1,0 +1,37 @@
+; Hinted RISC-V binaries run unchanged on a core without WinHint support
+; (qemu-riscv64 executes the HINT-space `ori x0, x0, imm` as a no-op):
+; plain, winhint (setwin), oracle (region markers) and pgo-style from-json
+; builds of the same inputs print identical output, and the hinted binaries do
+; contain hint instructions.
+;
+; REQUIRES: qemu-riscv64
+; RUN: rm -rf %t && mkdir -p %t
+; RUN: echo '{"regions": {"0": {"config": 0}, "1": {"W": 256}}}' > %t/map.json
+; RUN: %rvcc -O2 -static %inputs/phases.c -o %t/phases.plain -lm
+; RUN: %rvcc -O2 -static %whflags %inputs/phases.c -o %t/phases.winhint -lm
+; RUN: %rvcc -O2 -static %whflags -mllvm -winhint-mode=regions %inputs/phases.c -o %t/phases.regions -lm
+; RUN: %rvcc -O2 -static %whflags -mllvm -winhint-mode=from-json=%t/map.json %inputs/phases.c -o %t/phases.fromjson -lm
+; RUN: qemu-riscv64 %t/phases.plain > %t/phases.plain.out
+; RUN: qemu-riscv64 %t/phases.winhint > %t/phases.winhint.out
+; RUN: qemu-riscv64 %t/phases.regions > %t/phases.regions.out
+; RUN: qemu-riscv64 %t/phases.fromjson > %t/phases.fromjson.out
+; RUN: diff %t/phases.plain.out %t/phases.winhint.out
+; RUN: diff %t/phases.plain.out %t/phases.regions.out
+; RUN: diff %t/phases.plain.out %t/phases.fromjson.out
+; RUN: llvm-objdump -d %t/phases.winhint | FileCheck %s --check-prefix=SETWIN
+; RUN: llvm-objdump -d %t/phases.regions | FileCheck %s --check-prefix=REGION
+; RUN: %rvcc -O2 -static %inputs/libm.c -o %t/libm.plain -lm
+; RUN: %rvcc -O2 -static %whflags %inputs/libm.c -o %t/libm.winhint -lm
+; RUN: qemu-riscv64 %t/libm.plain > %t/libm.plain.out
+; RUN: qemu-riscv64 %t/libm.winhint > %t/libm.winhint.out
+; RUN: diff %t/libm.plain.out %t/libm.winhint.out
+; RUN: %rvcc -O2 -static %inputs/chase.c -o %t/chase.plain
+; RUN: %rvcc -O2 -static %whflags %inputs/chase.c -o %t/chase.winhint
+; RUN: qemu-riscv64 %t/chase.plain > %t/chase.plain.out
+; RUN: qemu-riscv64 %t/chase.winhint > %t/chase.winhint.out
+; RUN: diff %t/chase.plain.out %t/chase.winhint.out
+; RUN: FileCheck %s --check-prefix=OUT < %t/phases.winhint.out
+
+; SETWIN: {{[0-9a-f]+}}506013 {{.*}}ori zero, zero, 0x{{[0-9a-f]*}}5
+; REGION: {{[0-9a-f]+}}706013 {{.*}}ori zero, zero, 0x{{[0-9a-f]*}}7
+; OUT: phases {{[0-9.]+}}

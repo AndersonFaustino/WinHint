@@ -1,0 +1,17 @@
+# -*- mode:python -*-
+# WinHint: O3 window-resizing controller and decision policies.
+# Every *_policy.cc in this directory is compiled; each self-registers with
+# WindowPolicyRegistry (policy.hh). Subdirectories (e.g. ltp/) carry their
+# own SConscript, picked up by gem5's tree walk.
+
+import os
+
+Import('*')
+
+if env['CONF']['BUILD_ISA']:
+    Source('controller.cc')
+    here = Dir('.').srcnode().abspath
+    for f in sorted(os.listdir(here)):
+        if f.endswith('_policy.cc') and not f.startswith('window_'):
+            Source(f)
+    DebugFlag('WinHint', 'WinHint O3 window resizing and hints')

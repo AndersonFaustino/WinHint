@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+results/
+*.orig
+*.rej
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/

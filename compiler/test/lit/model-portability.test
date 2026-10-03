@@ -1,0 +1,43 @@
+; Cost model (print<winhint-demand>) on the three model kernels, for every
+; machine description: stream -> W_max, chase -> smallest config, compute ->
+; W* = W_cp; the target JSON is parsed (L_mem = L2 + memory latency) and W* of
+; the compute loop grows with the core (small < default < big), with no
+; retraining, only a different -winhint-target (portability, PROPOSAL §3.5).
+;
+; RUN: rm -rf %t && mkdir -p %t
+; RUN: %rvcc -O2 -gline-tables-only -S -emit-llvm %inputs/stream.c -o %t/stream.ll
+; RUN: %rvcc -O2 -gline-tables-only -S -emit-llvm %inputs/chase.c -o %t/chase.ll
+; RUN: %rvcc -O2 -gline-tables-only -S -emit-llvm %inputs/compute.c -o %t/compute.ll
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machines/riscv_ooo_small.json %t/stream.ll 2> %t/s.small
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machines/riscv_ooo_small.json %t/chase.ll 2> %t/c.small
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machines/riscv_ooo_small.json %t/compute.ll 2> %t/p.small
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machines/riscv_ooo.json %t/stream.ll 2> %t/s.def
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machines/riscv_ooo.json %t/chase.ll 2> %t/c.def
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machines/riscv_ooo.json %t/compute.ll 2> %t/p.def
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machines/riscv_ooo_big.json %t/stream.ll 2> %t/s.big
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machines/riscv_ooo_big.json %t/chase.ll 2> %t/c.big
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%machines/riscv_ooo_big.json %t/compute.ll 2> %t/p.big
+; RUN: %python %S/Inputs/check_model.py %machines/riscv_ooo_small.json %t/s.small %t/c.small %t/p.small > %t/w.small
+; RUN: %python -c "import subprocess,sys; w=open('%t/w.small').read().strip(); sys.exit(subprocess.call([sys.executable, '%S/Inputs/check_model.py', '%machines/riscv_ooo.json', '%t/s.def', '%t/c.def', '%t/p.def', w], stdout=open('%t/w.def', 'w')))"
+; RUN: %python -c "import subprocess,sys; w=open('%t/w.def').read().strip(); sys.exit(subprocess.call([sys.executable, '%S/Inputs/check_model.py', '%machines/riscv_ooo_big.json', '%t/s.big', '%t/c.big', '%t/p.big', w]))"
+;
+; A missing target falls back to the built-in default machine with a warning.
+; RUN: opt -load-pass-plugin=%wh -passes='print<winhint-demand>' -disable-output -winhint-target=%t/nonexistent.json %t/stream.ll 2>&1 | FileCheck %s --check-prefix=MISSING
+; MISSING: winhint: warning: cannot read {{.*}}nonexistent.json{{.*}}; using the built-in default machine
+; MISSING: WINHINT fn=triad
+;
+; End to end: the same source compiled with clang for each machine only by
+; switching -winhint-target; the streaming loop gets setwin(W_max) of that
+; machine (ROB 128 / 256 / 384 -> payload 16 / 32 / 48).
+; RUN: %rvcc -O2 -fplugin=%wh -fpass-plugin=%wh -mllvm -winhint-target=%machines/riscv_ooo_small.json -c %inputs/stream.c -o %t/small.o
+; RUN: %rvcc -O2 -fplugin=%wh -fpass-plugin=%wh -mllvm -winhint-target=%machines/riscv_ooo.json -c %inputs/stream.c -o %t/def.o
+; RUN: %rvcc -O2 -fplugin=%wh -fpass-plugin=%wh -mllvm -winhint-target=%machines/riscv_ooo_big.json -c %inputs/stream.c -o %t/big.o
+; RUN: llvm-objdump -d %t/small.o | FileCheck %s --check-prefix=SMALL
+; RUN: llvm-objdump -d %t/def.o | FileCheck %s --check-prefix=DEF
+; RUN: llvm-objdump -d %t/big.o | FileCheck %s --check-prefix=BIG
+; SMALL-LABEL: <triad>:
+; SMALL:       21506013 {{.*}}ori zero, zero, 0x215
+; DEF-LABEL:   <triad>:
+; DEF:         41506013 {{.*}}ori zero, zero, 0x415
+; BIG-LABEL:   <triad>:
+; BIG:         61506013 {{.*}}ori zero, zero, 0x615

@@ -1,0 +1,64 @@
+{
+ "name": "nested",
+ "cpu": {
+  "issue_width": 2,
+  "dispatch_width": 3,
+  "decode_width": 7,
+  "clock": "3"
+ },
+ "cache": {
+  "line_size": 128,
+  "l1d": {
+   "size": "16kB",
+   "latency": 2,
+   "mshrs": 6
+  },
+  "l2": {
+   "latency": 9
+  },
+  "l3": {
+   "size": "4M",
+   "hit_latency_cycles": 33
+  },
+  "l1d_size": "64kB",
+  "prefetcher": true,
+  "mshrs": 5
+ },
+ "memory": {
+  "latency": 99
+ },
+ "latency": {
+  "load_hit": 3,
+  "int_alu": 2,
+  "int_div": 30,
+  "fp_mul": 7,
+  "fp_fma": 8,
+  "fp_div": 21,
+  "fp_sqrt": 31,
+  "fp_cvt": 4,
+  "store": 2,
+  "branch": 2
+ },
+ "fu": {
+  "fp_div_units": 4,
+  "int_div_units": 0
+ },
+ "window": {
+  "configs": [
+   {
+    "rob": 96,
+    "iq": 40,
+    "lq": 30,
+    "sq": 20
+   },
+   {
+    "rob": 48
+   }
+  ]
+ },
+ "winhint": {
+  "mlp_target": 3.5,
+  "switch_cost_cycles": 77,
+  "l1d_mshrs": 4
+ }
+}
